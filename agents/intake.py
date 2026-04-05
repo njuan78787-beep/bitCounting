@@ -231,6 +231,6 @@ class IntakeAgent(BaseAgent):
     def _process_impl(self, message):
         raise AgentScopeError(
             agent_name=self.agent_name,
-            attempted_action="process typed message",
-            allowed_actions=["process_document(raw_input, source_format)"],
+            message_type=type(message).__name__,
+            allowed_types=(),
         )
