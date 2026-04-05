@@ -520,6 +520,66 @@ class HaciendaAgent(BaseAgent):
     # Helpers privados
     # ---------------------------------------------------------------------------
 
+    def get_due_date(self, form_id: str, period: date) -> date:
+        """
+        Retorna la fecha de vencimiento oficial para un formulario dado.
+
+        Reglas oficiales:
+          - SC-2915 / IVU-604: dia 20 del mes siguiente al periodo.
+          - 941-PR: ultimo dia del mes siguiente al fin del trimestre.
+          - 940 / FUTA: 31 de enero del ano siguiente.
+          - 499R-2 / W-2PR: 31 de enero del ano siguiente.
+          - 480.20: 15 de abril del ano siguiente.
+          - 1099-NEC: 31 de enero del ano siguiente.
+
+        Args:
+            form_id: Identificador del formulario (cualquier forma reconocida).
+            period:  Fecha del periodo cubierto (cualquier dia del mes/trimestre).
+
+        Returns:
+            Fecha de vencimiento oficial como date.
+        """
+        from datetime import timedelta
+
+        canonical = _FORM_ID_MAP.get(form_id.upper().replace(" ", "").replace("-", ""), form_id)
+        form_upper = form_id.upper().replace(" ", "")
+
+        # SC 2915 / IVU mensual: dia 20 del mes siguiente
+        if canonical == "SC 2915" or form_upper in ("SC2915", "IVU604", "IVU-604"):
+            if period.month == 12:
+                return date(period.year + 1, 1, 20)
+            return date(period.year, period.month + 1, 20)
+
+        # 941-PR: ultimo dia del mes siguiente al fin del trimestre
+        if canonical == "941-PR" or form_upper in ("941PR",):
+            quarter = (period.month - 1) // 3 + 1
+            quarter_end_month = quarter * 3
+            next_month = quarter_end_month + 1
+            if next_month > 12:
+                return date(period.year + 1, 2, 1) - timedelta(days=1)
+            if next_month + 1 > 12:
+                return date(period.year + 1, 1, 1) - timedelta(days=1)
+            return date(period.year, next_month + 1, 1) - timedelta(days=1)
+
+        # 940 / FUTA: 31 de enero del ano siguiente
+        if form_upper in ("940", "FUTA"):
+            return date(period.year + 1, 1, 31)
+
+        # W-2PR / 499R-2: 31 de enero del ano siguiente
+        if canonical == "W-2PR" or form_upper in ("499R2", "499R-2", "W2PR"):
+            return date(period.year + 1, 1, 31)
+
+        # 480.20: 15 de abril del ano siguiente
+        if form_upper in ("480.20", "48020"):
+            return date(period.year + 1, 4, 15)
+
+        # 1099-NEC: 31 de enero del ano siguiente
+        if form_upper in ("1099NEC", "1099-NEC"):
+            return date(period.year + 1, 1, 31)
+
+        # Default: 30 dias despues del periodo
+        return period + timedelta(days=30)
+
     @staticmethod
     def _calc_form_hash(
         fiscal: FiscalOutput,
