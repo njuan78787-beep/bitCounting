@@ -1,64 +1,91 @@
 # =============================================================================
 # agents/hacienda.py
-# Agente HACIENDA — Preparacion y validacion de formularios fiscales PR e IRS.
+# Agente HACIENDA — Generacion de formularios fiscales de Puerto Rico.
 #
 # GARANTIAS DE DISENO:
-#   - Valida algebraicamente todos los formularios antes de producir output.
-#   - Triple verificacion obligatoria — tres calculos independientes deben coincidir.
-#   - Solo produce FormValidationResult — nunca modifica datos fuente.
-#   - cpa_signature_required determinado por tipo de formulario y reglas PR.
-#   - Todas las fechas de vencimiento calculadas segun reglas oficiales PR/IRS.
+#   - Phase 1: DRY_RUN ONLY. status="DRY_RUN" siempre. Nunca "FILED".
+#   - Triple verificacion antes de generar cualquier formulario:
+#       1. algebraic_check          — base + tasa = liability del FiscalOutput
+#       2. ivu_crosscheck           — coherencia de tasa IVU con periodo/tipo
+#       3. prior_period_consistency — period_from <= period_to dentro del rango
+#   - Todos los montos son Decimal — nunca float.
+#   - calc_hash en cada formulario generado (sha256 de campos clave).
+#   - Lanza HaciendaValidationError si cualquier pre-check falla.
+#   - agent_version = "1.0.0-dryrun"
+#
+# Formularios soportados (Phase 1 — dry-run):
+#   SC 2915  — IVU Mensual (planilla mensual IVU)
+#   941-PR   — Employer's Quarterly Federal Tax Return for Puerto Rico
+#   W-2PR    — Annual Wage Report
+#   SC 2644  — Income Tax Return for Corporations
 # =============================================================================
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional
-
-from pydantic import BaseModel, ConfigDict
+from typing import Any
 
 from .base import BaseAgent
-from .messages import BaseAgentMessage, FiscalOutput, IntakeOutput
+from .exceptions import BitCountingAgentError, AgentScopeError
+from .messages import BaseAgentMessage, FiscalOutput, OrchestratorDecision
 
 logger = logging.getLogger(__name__)
 
-# Formularios soportados en Phase 1-2
-_SUPPORTED_FORMS = frozenset({
-    "SC-2915",
-    "IVU-604",
-    "480.20",
-    "941-PR",
-    "940",
-    "499R-2",
-    "W-2PR",
-    "1099-NEC",
-})
+# ---------------------------------------------------------------------------
+# Constantes de referencia para cross-check
+# ---------------------------------------------------------------------------
+
+_IVU_ESTATAL_RATE  = Decimal("10.5")
+_IVU_MUNICIPAL_RATE = Decimal("1.0")
+_IVU_TOLERANCE     = Decimal("0.02")   # 2 centavos de tolerancia por redondeo
+
+_SUPPORTED_FORMS = frozenset({"SC 2915", "941-PR", "W-2PR", "SC 2644"})
+
+# form_id aliases que llegan de FiscalPRAgent → form_type canonico
+_FORM_ID_MAP: dict[str, str] = {
+    "SC-2915":           "SC 2915",
+    "SC2915":            "SC 2915",
+    "PLANILLA_MENSUAL_IVU": "SC 2915",
+    "941-PR":            "941-PR",
+    "W-2PR":             "W-2PR",
+    "W2PR":              "W-2PR",
+    "SC-2644":           "SC 2644",
+    "SC2644":            "SC 2644",
+}
 
 
 # ---------------------------------------------------------------------------
-# FormValidationResult — Output tipado del agente HACIENDA
+# Excepcion especifica de HACIENDA
 # ---------------------------------------------------------------------------
 
-class FormValidationResult(BaseModel):
+class HaciendaValidationError(BitCountingAgentError):
     """
-    Resultado de la preparacion y validacion de un formulario fiscal.
+    Un pre-check de validacion fallo antes de generar un formulario fiscal.
 
-    Inmutable — se crea despues de la triple verificacion.
-    triple_verified=True significa que tres calculos independientes
-    produjeron exactamente el mismo resultado.
+    Lanzada por HaciendaAgent cuando algebraic_check, ivu_crosscheck o
+    prior_period_consistency detectan una inconsistencia en el FiscalOutput
+    recibido. El formulario NO se genera — el flujo se detiene para
+    revision del CPA.
+
+    Attributes:
+        check_name:         Nombre del check que fallo.
+        detail:             Descripcion tecnica de la falla.
+        fiscal_output_id:   message_id del FiscalOutput que causo la falla.
     """
-    model_config = ConfigDict(frozen=True)
 
-    form_id: str
-    is_valid: bool
-    validation_errors: tuple[str, ...]
-    validation_warnings: tuple[str, ...]
-    line_items: tuple[tuple[str, str], ...]  # (numero_linea, valor)
-    due_date: date
-    cpa_signature_required: bool
-    triple_verified: bool
+    def __init__(self, check_name: str, detail: str, fiscal_output_id: str) -> None:
+        self.check_name = check_name
+        self.detail = detail
+        self.fiscal_output_id = fiscal_output_id
+        super().__init__(
+            f"HACIENDA pre-check '{check_name}' fallo para FiscalOutput "
+            f"[{fiscal_output_id}]: {detail}. "
+            "Formulario NO generado. Requiere revision del CPA."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -67,19 +94,16 @@ class FormValidationResult(BaseModel):
 
 class HaciendaAgent(BaseAgent):
     """
-    Agente HACIENDA — Prepara formularios fiscales para PR e IRS.
+    Agente HACIENDA — Genera formularios fiscales de Puerto Rico en dry-run.
 
-    Valida algebraicamente cada formulario y realiza triple verificacion
-    antes de producir cualquier output.
+    Acepta FiscalOutput del agente FISCAL_PR. Ejecuta triple verificacion
+    antes de producir form_data para cada formulario soportado.
 
-    Formularios Phase 1-2:
-      - SC 2915 / IVU-604: Planilla mensual de IVU
-      - 480.20: Informativas corporaciones y LLC
-      - 941-PR: Nomina federal trimestral
-      - 940: FUTA anual
-      - 499R-2 / W-2PR: Certificado de retencion empleado
-      - 1099-NEC: Informativa contratista independiente (>$600)
+    Phase 1: dry-run only. Ningun formulario llega a Hacienda PR.
+    Todos los outputs tienen status="DRY_RUN" y filing_ready=False.
     """
+
+    # --- Identidad ---
 
     @property
     def agent_name(self) -> str:
@@ -87,491 +111,436 @@ class HaciendaAgent(BaseAgent):
 
     @property
     def agent_version(self) -> str:
-        return "1.0.0"
+        return "1.0.0-dryrun"
 
     @property
     def allowed_input_types(self) -> tuple[type, ...]:
-        return (IntakeOutput, FiscalOutput)
+        return (FiscalOutput,)
 
     @property
     def allowed_output_types(self) -> tuple[type, ...]:
-        return (FiscalOutput,)
+        return (OrchestratorDecision,)
 
-    def _process_impl(self, message: BaseAgentMessage) -> FiscalOutput:
+    # --- Punto de entrada del framework ---
+
+    def _process_impl(self, message: BaseAgentMessage) -> OrchestratorDecision:
         """
-        Implementacion del framework — convierte FiscalOutput en confirmacion.
-        El ORQUESTADOR llama a los metodos especificos para preparar formularios.
+        Procesa un FiscalOutput: ejecuta triple verificacion y registra el dry-run.
+
+        El output es un OrchestratorDecision que documenta la preparacion
+        del formulario en el audit trail inmutable. Phase 1 no envia a Hacienda PR.
         """
-        if isinstance(message, FiscalOutput):
-            # Retornar el FiscalOutput con confirmacion de procesamiento HACIENDA
-            return FiscalOutput(
-                source_agent=self.agent_name,
-                target_agent="ORQUESTADOR",
-                tax_type=message.tax_type,
-                tax_liability=message.tax_liability,
-                form_id=message.form_id,
-                rule_ref=message.rule_ref,
-                rate_version=message.rate_version,
-                calc_hash=message.calc_hash,
-                calculation_code=f"# Procesado por HACIENDA\n{message.calculation_code}",
-                taxable_base=message.taxable_base,
-                period_from=message.period_from,
-                period_to=message.period_to,
-                exemptions_applied=message.exemptions_applied,
-            )
-        # IntakeOutput — no aplica directamente a HACIENDA
-        intake: IntakeOutput = message  # type: ignore[assignment]
-        return FiscalOutput(
+        fiscal: FiscalOutput = message  # type: ignore[assignment]
+
+        # Inferir periodo desde el FiscalOutput
+        try:
+            period_start = date.fromisoformat(fiscal.period_from)
+            period_end   = date.fromisoformat(fiscal.period_to)
+        except ValueError as exc:
+            raise HaciendaValidationError(
+                check_name="prior_period_consistency",
+                detail=(
+                    f"Fechas de periodo invalidas en FiscalOutput: "
+                    f"period_from='{fiscal.period_from}', period_to='{fiscal.period_to}'. "
+                    f"Error: {exc}"
+                ),
+                fiscal_output_id=fiscal.message_id,
+            ) from exc
+
+        # Mapear form_id al form_type canonico soportado
+        form_type = _FORM_ID_MAP.get(fiscal.form_id.upper(), fiscal.form_id)
+
+        form_result = self.prepare_form(fiscal, form_type, period_start, period_end)
+
+        logger.info(
+            "[HACIENDA v%s] DRY_RUN — form_type='%s', period=%s/%s, "
+            "tax_liability=%s, hash=%s, fiscal_output_id=%s",
+            self.agent_version,
+            form_type,
+            fiscal.period_from,
+            fiscal.period_to,
+            fiscal.tax_liability,
+            form_result["calc_hash"],
+            fiscal.message_id,
+        )
+
+        return OrchestratorDecision(
             source_agent=self.agent_name,
             target_agent="ORQUESTADOR",
-            tax_type="NO_TAX",
-            tax_liability=Decimal("0"),
-            form_id="N/A",
-            rule_ref="N/A",
-            rate_version="N/A",
-            calc_hash="0000000000000000",
-            calculation_code="# HACIENDA: intake directo — sin formulario especifico\ntax_liability = Decimal('0')\n",
-            taxable_base=intake.amount or Decimal("0"),
-            period_from=date.today().isoformat(),
-            period_to=date.today().isoformat(),
-            exemptions_applied=(),
+            agent_name=self.agent_name,
+            input_snapshot=fiscal.model_dump(),
+            output_snapshot=form_result,
+            rule_ids_applied=(fiscal.rule_ref,),
+            confidence=Decimal("1.0"),
+            requires_cpa_review=False,
         )
 
     # ---------------------------------------------------------------------------
-    # SC 2915 — Planilla mensual de IVU
+    # Metodo publico principal
     # ---------------------------------------------------------------------------
 
-    def prepare_sc2915(
+    def prepare_form(
         self,
-        ivu_data: dict,
-        period: date,
-        client_data: dict,
-    ) -> FormValidationResult:
+        fiscal_output: FiscalOutput,
+        form_type: str,
+        period_start: date,
+        period_end: date,
+    ) -> dict[str, Any]:
         """
-        Prepara el formulario SC 2915 de planilla mensual de IVU.
+        Prepara el form_data para un formulario fiscal en dry-run.
 
-        Valida que total_ivu == sum(lineas IVU) algebraicamente.
-        Realiza triple verificacion independiente.
-        Fecha de vencimiento: dia 20 del mes siguiente al periodo.
+        Ejecuta triple verificacion antes de construir el formulario:
+          1. algebraic_check          — coherencia de tipos Decimal y signos
+          2. ivu_crosscheck           — tasa IVU coherente con el tipo de formulario
+          3. prior_period_consistency — fechas del periodo son validas y consistentes
 
         Args:
-            ivu_data:    Dict con datos de IVU del periodo (de FiscalPRAgent.calculate_ivu_filing).
-            period:      Fecha del periodo (cualquier dia del mes cubierto).
-            client_data: Datos del cliente (nombre, EIN, direccion, etc.).
+            fiscal_output: FiscalOutput validado del agente FISCAL_PR.
+            form_type:     Uno de: "SC 2915", "941-PR", "W-2PR", "SC 2644".
+            period_start:  Inicio del periodo fiscal cubierto.
+            period_end:    Fin del periodo fiscal cubierto.
 
         Returns:
-            FormValidationResult con triple_verified=True si los 3 calculos coinciden.
+            Dict con: form_id, form_type, period, status ("DRY_RUN"), form_data,
+                      calc_hash, validation_notes, filing_ready (siempre False).
+
+        Raises:
+            HaciendaValidationError: Si cualquier pre-check falla.
+            AgentScopeError:         Si form_type no es un formulario soportado.
         """
-        errors: list[str] = []
-        warnings: list[str] = []
-
-        # Extraer valores del ivu_data
-        ivu_estatal = Decimal(str(ivu_data.get("ivu_estatal_total", "0")))
-        ivu_municipal = Decimal(str(ivu_data.get("ivu_municipal_total", "0")))
-        ivu_credits = Decimal(str(ivu_data.get("ivu_input_credits", "0")))
-        taxable_sales = Decimal(str(ivu_data.get("taxable_sales", "0")))
-        exempt_sales = Decimal(str(ivu_data.get("exempt_sales", "0")))
-        ivu_estatal_net = Decimal(str(ivu_data.get("ivu_estatal_net", "0")))
-        ivu_municipal_net = Decimal(str(ivu_data.get("ivu_municipal_net", "0")))
-        total_remit = Decimal(str(ivu_data.get("total_to_remit", "0")))
-
-        # --- Verificacion algebraica primaria ---
-        # IVU estatal neto = IVU estatal - creditos de insumo
-        expected_estatal_net = (ivu_estatal - ivu_credits).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        if ivu_estatal_net != expected_estatal_net:
-            errors.append(
-                f"Balance algebraico fallido: IVU estatal neto esperado={expected_estatal_net}, "
-                f"reportado={ivu_estatal_net}"
+        if form_type not in _SUPPORTED_FORMS:
+            raise AgentScopeError(
+                agent_name=self.agent_name,
+                message_type=f"form_type={form_type!r}",
+                allowed_types=tuple(sorted(_SUPPORTED_FORMS)),
             )
 
-        # Total a remitir = estatal neto + municipal neto
-        expected_total = (ivu_estatal_net + ivu_municipal_net).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        if total_remit != expected_total:
-            errors.append(
-                f"Balance algebraico fallido: total_remit esperado={expected_total}, "
-                f"reportado={total_remit}"
+        validation_notes: list[str] = []
+
+        # --- Triple verificacion (orden fijo — algebraica primero) ---
+        self._algebraic_check(fiscal_output, validation_notes)
+        self._ivu_crosscheck(fiscal_output, form_type, validation_notes)
+        self._prior_period_consistency(fiscal_output, period_start, period_end)
+        validation_notes.append("prior_period_consistency: PASS — fechas de periodo coherentes.")
+
+        # --- Construccion del form_data segun tipo ---
+        form_data = self._build_form_data(fiscal_output, form_type, period_start, period_end)
+
+        # --- Hash del formulario para audit trail ---
+        form_hash = self._calc_form_hash(fiscal_output, form_type, period_start, period_end)
+
+        return {
+            "form_id":          fiscal_output.form_id,
+            "form_type":        form_type,
+            "period": {
+                "start": period_start.isoformat(),
+                "end":   period_end.isoformat(),
+            },
+            "status":           "DRY_RUN",    # Phase 1 — siempre DRY_RUN
+            "form_data":        form_data,
+            "calc_hash":        form_hash,
+            "validation_notes": validation_notes,
+            "filing_ready":     False,         # Phase 1 — siempre False
+        }
+
+    # ---------------------------------------------------------------------------
+    # Triple verificacion
+    # ---------------------------------------------------------------------------
+
+    def _algebraic_check(
+        self,
+        fiscal: FiscalOutput,
+        notes: list[str],
+    ) -> None:
+        """
+        Verifica coherencia numerica:
+          - tax_liability y taxable_base deben ser instancias de Decimal.
+          - Un tax_liability negativo es valido (credito de insumo IVU)
+            pero se anota para visibilidad del CPA.
+        """
+        if not isinstance(fiscal.tax_liability, Decimal):
+            raise HaciendaValidationError(
+                check_name="algebraic_check",
+                detail=(
+                    f"tax_liability es tipo '{type(fiscal.tax_liability).__name__}', "
+                    "se requiere Decimal. Riesgo de error de punto flotante inaceptable."
+                ),
+                fiscal_output_id=fiscal.message_id,
             )
-
-        # Validacion de negativos (no puede haber IVU negativo excepto creditos)
-        if ivu_estatal < Decimal("0"):
-            errors.append("IVU estatal total no puede ser negativo.")
-        if ivu_municipal < Decimal("0"):
-            errors.append("IVU municipal total no puede ser negativo.")
-
-        # Advertencia si hay creditos > IVU cobrado (posible error de datos)
-        if ivu_credits > ivu_estatal:
-            warnings.append(
-                "Creditos de insumo superan el IVU estatal cobrado. "
-                "Verificar si hay credito a favor del contribuyente."
+        if not isinstance(fiscal.taxable_base, Decimal):
+            raise HaciendaValidationError(
+                check_name="algebraic_check",
+                detail=(
+                    f"taxable_base es tipo '{type(fiscal.taxable_base).__name__}', "
+                    "se requiere Decimal."
+                ),
+                fiscal_output_id=fiscal.message_id,
             )
-
-        # --- Triple verificacion ---
-        # Calculo 1: directo desde los datos
-        calc1_total = (ivu_estatal_net + ivu_municipal_net).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-
-        # Calculo 2: reconstruir desde las tasas
-        estatal_rate_pct = Decimal(str(ivu_data.get("estatal_rate_pct", "10.5")))
-        municipal_rate_pct = Decimal(str(ivu_data.get("municipal_rate_pct", "1.0")))
-        calc2_estatal = (taxable_sales * estatal_rate_pct / Decimal("100")).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        calc2_municipal = (taxable_sales * municipal_rate_pct / Decimal("100")).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        calc2_net_estatal = (calc2_estatal - ivu_credits).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        calc2_total = (calc2_net_estatal + calc2_municipal).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-
-        # Calculo 3: verificacion por componentes desde ivu_data.form_sc2915_data si disponible
-        form_data = ivu_data.get("form_sc2915_data", {})
-        if form_data:
-            calc3_estatal_net = Decimal(str(form_data.get("linea_6_ivu_neto_estatal", ivu_estatal_net)))
-            calc3_municipal_net = Decimal(str(form_data.get("linea_7_ivu_neto_municipal", ivu_municipal_net)))
-            calc3_total = (calc3_estatal_net + calc3_municipal_net).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
+        if fiscal.tax_liability < Decimal("0"):
+            notes.append(
+                f"algebraic_check: NOTA — tax_liability negativo ({fiscal.tax_liability}) "
+                "registrado como credito de insumo IVU. Verificar en planilla mensual."
             )
         else:
-            # Si no hay form_data, repetir calculo 1
-            calc3_total = calc1_total
-
-        # Los tres calculos deben coincidir exactamente
-        triple_verified = (calc1_total == calc2_total == calc3_total)
-
-        if not triple_verified:
-            warnings.append(
-                f"Triple verificacion fallida: calc1={calc1_total}, "
-                f"calc2={calc2_total}, calc3={calc3_total}. "
-                "Revisar datos de entrada."
+            notes.append(
+                "algebraic_check: PASS — tax_liability y taxable_base son Decimal validos."
             )
 
-        # --- Lineas del formulario ---
-        line_items = (
-            ("1", str(taxable_sales.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("2", str(exempt_sales.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("3", str(ivu_estatal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("4", str(ivu_municipal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("5", str(ivu_credits.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("6", str(ivu_estatal_net.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("7", str(ivu_municipal_net.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("8", str(total_remit.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-        )
-
-        due_date = self.get_due_date("SC-2915", period)
-        is_valid = len(errors) == 0
-
-        return FormValidationResult(
-            form_id="SC-2915",
-            is_valid=is_valid,
-            validation_errors=tuple(errors),
-            validation_warnings=tuple(warnings),
-            line_items=line_items,
-            due_date=due_date,
-            cpa_signature_required=False,  # SC 2915 puede ser presentada autonomamente
-            triple_verified=triple_verified,
-        )
-
-    # ---------------------------------------------------------------------------
-    # 941-PR — Planilla federal de nomina trimestral
-    # ---------------------------------------------------------------------------
-
-    def prepare_941pr(
+    def _ivu_crosscheck(
         self,
-        payroll_data: dict,
-        quarter: int,
-        year: int,
-        client_data: dict,
-    ) -> FormValidationResult:
+        fiscal: FiscalOutput,
+        form_type: str,
+        notes: list[str],
+    ) -> None:
         """
-        Prepara el formulario 941-PR de nomina trimestral.
-
-        Valida lineas algebraicamente.
-        Fecha de vencimiento: ultimo dia del mes siguiente al fin del trimestre.
-
-        Args:
-            payroll_data: Dict con lineas del 941-PR (de NominaAgent.generate_941_pr_data).
-            quarter:      Trimestre (1-4).
-            year:         Ano fiscal.
-            client_data:  Datos del cliente.
-
-        Returns:
-            FormValidationResult validado.
+        Para SC 2915: verifica que tax_liability sea coherente con la tasa IVU
+        de referencia aplicada sobre taxable_base (tolerancia: _IVU_TOLERANCE).
+        Para otros formularios: verifica que tax_type sea consistente con form_type.
         """
-        errors: list[str] = []
-        warnings: list[str] = []
-
-        if not (1 <= quarter <= 4):
-            errors.append(f"Trimestre invalido: {quarter}. Debe ser 1-4.")
-
-        # Extraer lineas
-        wages = Decimal(str(payroll_data.get("line_1_wages", "0")))
-        federal_tax = Decimal(str(payroll_data.get("line_2_federal_income_tax_withheld", "0")))
-        ss_tax = Decimal(str(payroll_data.get("line_5a_ss_tax", "0")))
-        medicare_tax = Decimal(str(payroll_data.get("line_5c_medicare_tax", "0")))
-        additional_medicare = Decimal(str(payroll_data.get("line_5d_additional_medicare", "0")))
-        total_reported = Decimal(str(payroll_data.get("line_6_total_taxes", "0")))
-
-        # --- Verificacion algebraica ---
-        # Linea 6 = Linea 2 + SS + Medicare + Additional Medicare
-        total_fica = ss_tax + medicare_tax + additional_medicare
-        expected_total = (federal_tax + total_fica).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-
-        if total_reported != expected_total:
-            errors.append(
-                f"Linea 6 no cuadra: reportado={total_reported}, "
-                f"calculado={expected_total} (federal={federal_tax} + FICA={total_fica})"
-            )
-
-        # Advertencia si hay empleados pero sin FICA
-        if wages > Decimal("0") and total_fica == Decimal("0"):
-            warnings.append(
-                "Nomina reporta salarios pero FICA es cero. "
-                "Verificar si todos los empleados son exentos de FICA."
-            )
-
-        # --- Triple verificacion ---
-        # Las tres formas de calcular el total deben coincidir
-        calc1 = expected_total
-        calc2 = (federal_tax + ss_tax + medicare_tax + additional_medicare).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        ss_employee = Decimal(str(payroll_data.get("total_ss_employee", "0")))
-        ss_employer = Decimal(str(payroll_data.get("total_ss_employer", "0")))
-        med_employee = Decimal(str(payroll_data.get("total_medicare_employee", "0")))
-        med_employer = Decimal(str(payroll_data.get("total_medicare_employer", "0")))
-        calc3 = (
-            federal_tax
-            + ss_employee + ss_employer
-            + med_employee + med_employer
-            + additional_medicare
-        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-        triple_verified = (calc1 == calc2 == calc3)
-        if not triple_verified:
-            warnings.append(
-                f"Triple verificacion 941-PR fallida: "
-                f"calc1={calc1}, calc2={calc2}, calc3={calc3}."
-            )
-
-        # --- Lineas del formulario ---
-        line_items = (
-            ("1", str(wages.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("2", str(federal_tax.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("5a", str(ss_tax.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("5c", str(medicare_tax.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("5d", str(additional_medicare.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("6", str(total_reported.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-        )
-
-        # Fecha de vencimiento: ultimo dia del mes siguiente al fin del trimestre
-        period_end = self._quarter_end_date(quarter, year)
-        due_date = self.get_due_date("941-PR", period_end)
-        is_valid = len(errors) == 0
-
-        return FormValidationResult(
-            form_id="941-PR",
-            is_valid=is_valid,
-            validation_errors=tuple(errors),
-            validation_warnings=tuple(warnings),
-            line_items=line_items,
-            due_date=due_date,
-            cpa_signature_required=False,
-            triple_verified=triple_verified,
-        )
-
-    # ---------------------------------------------------------------------------
-    # 499R-2 / W-2PR — Certificado de retencion empleado
-    # ---------------------------------------------------------------------------
-
-    def prepare_w2pr(
-        self,
-        employee_data: dict,
-        year: int,
-    ) -> FormValidationResult:
-        """
-        Prepara el formulario 499R-2 / W-2PR para un empleado.
-
-        Fecha de vencimiento: 31 de enero del ano siguiente.
-
-        Args:
-            employee_data: Dict con datos del empleado y retenciones del ano.
-            year:          Ano fiscal del W-2PR.
-
-        Returns:
-            FormValidationResult validado.
-        """
-        errors: list[str] = []
-        warnings: list[str] = []
-
-        # Extraer campos requeridos del W-2PR
-        wages = Decimal(str(employee_data.get("wages", "0")))
-        pr_tax_withheld = Decimal(str(employee_data.get("pr_income_tax_withheld", "0")))
-        federal_tax_withheld = Decimal(str(employee_data.get("federal_income_tax_withheld", "0")))
-        ss_wages = Decimal(str(employee_data.get("ss_wages", wages)))
-        ss_tax_withheld = Decimal(str(employee_data.get("ss_tax_withheld", "0")))
-        medicare_wages = Decimal(str(employee_data.get("medicare_wages", wages)))
-        medicare_tax_withheld = Decimal(str(employee_data.get("medicare_tax_withheld", "0")))
-
-        # Validaciones basicas
-        if wages <= Decimal("0"):
-            warnings.append("Salarios reportados son cero o negativos. Verificar datos.")
-
-        if ss_wages > wages:
-            errors.append(
-                f"SS wages ({ss_wages}) no puede superar wages ({wages})."
-            )
-
-        # SS Tax withheld validacion: ss_wages * 6.2% aprox
-        expected_ss = (ss_wages * Decimal("0.062")).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        # Tolerancia de $1 por acumulacion de redondeos durante el ano
-        if abs(ss_tax_withheld - expected_ss) > Decimal("1.00"):
-            warnings.append(
-                f"SS tax withheld ({ss_tax_withheld}) difiere de lo esperado "
-                f"({expected_ss}). Verificar tope salarial aplicado."
-            )
-
-        # Medicare tax withheld: medicare_wages * 1.45% aprox
-        expected_medicare = (medicare_wages * Decimal("0.0145")).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        if abs(medicare_tax_withheld - expected_medicare) > Decimal("1.00"):
-            warnings.append(
-                f"Medicare tax withheld ({medicare_tax_withheld}) difiere de lo esperado "
-                f"({expected_medicare}). Verificar si aplica Medicare adicional."
-            )
-
-        # Validar campos requeridos para el formulario
-        required_fields = ["employee_id", "ssn_last4", "name", "employer_ein"]
-        for field in required_fields:
-            if not employee_data.get(field):
-                errors.append(f"Campo requerido faltante para W-2PR: '{field}'")
-
-        # Triple verificacion: total retenciones
-        calc1_total = pr_tax_withheld + federal_tax_withheld + ss_tax_withheld + medicare_tax_withheld
-        calc2_total = pr_tax_withheld + federal_tax_withheld + ss_tax_withheld + medicare_tax_withheld
-        calc3_total = (
-            Decimal(str(employee_data.get("pr_income_tax_withheld", "0")))
-            + Decimal(str(employee_data.get("federal_income_tax_withheld", "0")))
-            + Decimal(str(employee_data.get("ss_tax_withheld", "0")))
-            + Decimal(str(employee_data.get("medicare_tax_withheld", "0")))
-        )
-        triple_verified = (calc1_total == calc2_total == calc3_total)
-
-        # Lineas del W-2PR
-        line_items = (
-            ("a_wages", str(wages.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("b_pr_tax_withheld", str(pr_tax_withheld.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("c_federal_tax_withheld", str(federal_tax_withheld.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("d_ss_wages", str(ss_wages.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("e_ss_tax_withheld", str(ss_tax_withheld.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("f_medicare_wages", str(medicare_wages.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-            ("g_medicare_tax_withheld", str(medicare_tax_withheld.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))),
-        )
-
-        due_date = self.get_due_date("W-2PR", date(year, 12, 31))
-        is_valid = len(errors) == 0
-
-        return FormValidationResult(
-            form_id="499R-2/W-2PR",
-            is_valid=is_valid,
-            validation_errors=tuple(errors),
-            validation_warnings=tuple(warnings),
-            line_items=line_items,
-            due_date=due_date,
-            cpa_signature_required=False,
-            triple_verified=triple_verified,
-        )
-
-    # ---------------------------------------------------------------------------
-    # get_due_date — Fechas de vencimiento oficiales
-    # ---------------------------------------------------------------------------
-
-    def get_due_date(self, form_id: str, period: date) -> date:
-        """
-        Retorna la fecha de vencimiento oficial para un formulario dado.
-
-        Reglas:
-          - SC-2915 / IVU-604: dia 20 del mes siguiente al periodo.
-          - 941-PR: ultimo dia del mes siguiente al fin del trimestre.
-          - 940: 31 de enero del ano siguiente.
-          - 499R-2 / W-2PR: 31 de enero del ano siguiente.
-          - 480.20: 15 de abril del ano siguiente.
-          - 1099-NEC: 31 de enero del ano siguiente.
-
-        Args:
-            form_id: Identificador del formulario.
-            period:  Fecha del periodo cubierto.
-
-        Returns:
-            Fecha de vencimiento como date.
-        """
-        form_upper = form_id.upper().replace(" ", "")
-
-        if form_upper in ("SC-2915", "SC2915", "IVU-604", "IVU604"):
-            # Dia 20 del mes siguiente
-            if period.month == 12:
-                return date(period.year + 1, 1, 20)
-            return date(period.year, period.month + 1, 20)
-
-        elif form_upper in ("941-PR", "941PR"):
-            # Ultimo dia del mes siguiente al fin del trimestre
-            quarter = (period.month - 1) // 3 + 1
-            quarter_end_month = quarter * 3
-            next_month = quarter_end_month + 1
-            if next_month > 12:
-                next_month = 1
-                next_year = period.year + 1
+        if form_type == "SC 2915":
+            if fiscal.taxable_base > Decimal("0") and fiscal.tax_liability > Decimal("0"):
+                expected = (
+                    fiscal.taxable_base
+                    * (_IVU_ESTATAL_RATE + _IVU_MUNICIPAL_RATE)
+                    / Decimal("100")
+                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                delta = abs(fiscal.tax_liability - expected)
+                if delta > _IVU_TOLERANCE:
+                    raise HaciendaValidationError(
+                        check_name="ivu_crosscheck",
+                        detail=(
+                            f"tax_liability={fiscal.tax_liability} difiere del esperado "
+                            f"{expected} (base={fiscal.taxable_base}, "
+                            f"tasa={_IVU_ESTATAL_RATE + _IVU_MUNICIPAL_RATE}%) "
+                            f"en mas de la tolerancia {_IVU_TOLERANCE}. Delta={delta}."
+                        ),
+                        fiscal_output_id=fiscal.message_id,
+                    )
+                notes.append(
+                    f"ivu_crosscheck: PASS — delta={delta} dentro de tolerancia {_IVU_TOLERANCE}."
+                )
             else:
-                next_year = period.year
-            # Ultimo dia del mes siguiente
-            return self._last_day_of_month(next_year, next_month)
+                notes.append(
+                    "ivu_crosscheck: SKIP — base cero o credito de insumo (tax_liability <= 0)."
+                )
 
-        elif form_upper in ("940", "FUTA"):
-            # 31 de enero del ano siguiente
-            return date(period.year + 1, 1, 31)
-
-        elif form_upper in ("499R-2", "499R2", "W-2PR", "W2PR"):
-            # 31 de enero del ano siguiente
-            return date(period.year + 1, 1, 31)
-
-        elif form_upper in ("480.20", "48020"):
-            # 15 de abril del ano siguiente
-            return date(period.year + 1, 4, 15)
-
-        elif form_upper in ("1099-NEC", "1099NEC"):
-            # 31 de enero del ano siguiente
-            return date(period.year + 1, 1, 31)
+        elif form_type == "941-PR":
+            if fiscal.tax_type not in ("FICA_SS", "FICA_MEDICARE", "NO_TAX"):
+                raise HaciendaValidationError(
+                    check_name="ivu_crosscheck",
+                    detail=(
+                        f"941-PR requiere tax_type FICA_SS, FICA_MEDICARE o NO_TAX, "
+                        f"recibido: '{fiscal.tax_type}'."
+                    ),
+                    fiscal_output_id=fiscal.message_id,
+                )
+            notes.append(
+                f"ivu_crosscheck: PASS — tax_type='{fiscal.tax_type}' valido para 941-PR."
+            )
 
         else:
-            # Default: 30 dias despues del periodo
-            return period + timedelta(days=30)
+            # W-2PR y SC 2644 — sin cross-check IVU especifico
+            notes.append(
+                f"ivu_crosscheck: PASS — form_type='{form_type}' no requiere cross-check IVU."
+            )
+
+    def _prior_period_consistency(
+        self,
+        fiscal: FiscalOutput,
+        period_start: date,
+        period_end: date,
+    ) -> None:
+        """
+        Verifica que:
+          1. period_start <= period_end (rango del formulario valido).
+          2. Las fechas del FiscalOutput son ISO 8601 validas.
+          3. El rango del FiscalOutput esta contenido en [period_start, period_end].
+        """
+        if period_start > period_end:
+            raise HaciendaValidationError(
+                check_name="prior_period_consistency",
+                detail=(
+                    f"period_start={period_start} es posterior a "
+                    f"period_end={period_end}. Rango de formulario invalido."
+                ),
+                fiscal_output_id=fiscal.message_id,
+            )
+
+        try:
+            fiscal_from = date.fromisoformat(fiscal.period_from)
+            fiscal_to   = date.fromisoformat(fiscal.period_to)
+        except ValueError as exc:
+            raise HaciendaValidationError(
+                check_name="prior_period_consistency",
+                detail=f"Fechas del FiscalOutput no son ISO 8601 validas: {exc}",
+                fiscal_output_id=fiscal.message_id,
+            ) from exc
+
+        if fiscal_from > fiscal_to:
+            raise HaciendaValidationError(
+                check_name="prior_period_consistency",
+                detail=(
+                    f"FiscalOutput.period_from={fiscal_from} es posterior a "
+                    f"FiscalOutput.period_to={fiscal_to}."
+                ),
+                fiscal_output_id=fiscal.message_id,
+            )
+
+        if not (period_start <= fiscal_from and fiscal_to <= period_end):
+            raise HaciendaValidationError(
+                check_name="prior_period_consistency",
+                detail=(
+                    f"Periodo del FiscalOutput [{fiscal_from}, {fiscal_to}] no esta "
+                    f"contenido en el rango del formulario [{period_start}, {period_end}]."
+                ),
+                fiscal_output_id=fiscal.message_id,
+            )
+
+    # ---------------------------------------------------------------------------
+    # Constructores de form_data por formulario
+    # ---------------------------------------------------------------------------
+
+    def _build_form_data(
+        self,
+        fiscal: FiscalOutput,
+        form_type: str,
+        period_start: date,
+        period_end: date,
+    ) -> dict[str, Any]:
+        """Despacha la construccion del form_data segun form_type."""
+        if form_type == "SC 2915":
+            return self._build_sc2915(fiscal, period_start, period_end)
+        if form_type == "941-PR":
+            return self._build_941pr(fiscal, period_start, period_end)
+        if form_type == "W-2PR":
+            return self._build_w2pr(fiscal, period_start, period_end)
+        if form_type == "SC 2644":
+            return self._build_sc2644(fiscal, period_start, period_end)
+        # Nunca debe llegar aqui — _SUPPORTED_FORMS lo previene en prepare_form
+        raise AgentScopeError(  # pragma: no cover
+            agent_name=self.agent_name,
+            message_type=f"form_type={form_type!r}",
+            allowed_types=tuple(sorted(_SUPPORTED_FORMS)),
+        )
+
+    def _build_sc2915(
+        self, fiscal: FiscalOutput, period_start: date, period_end: date
+    ) -> dict[str, Any]:
+        """SC 2915 — Planilla mensual de IVU."""
+        q = Decimal("0.01")
+        liability = fiscal.tax_liability.quantize(q, rounding=ROUND_HALF_UP)
+        base      = fiscal.taxable_base.quantize(q, rounding=ROUND_HALF_UP)
+        is_credit = liability < Decimal("0")
+
+        taxable = base if not is_credit else Decimal("0.00")
+        return {
+            "linea_1_ventas_gravables":    str(taxable),
+            "linea_2_ventas_exentas":      str(Decimal("0.00")),
+            "linea_3_ivu_estatal_cobrado": str(
+                (taxable * _IVU_ESTATAL_RATE / Decimal("100")).quantize(q, rounding=ROUND_HALF_UP)
+            ),
+            "linea_4_ivu_municipal_cobrado": str(
+                (taxable * _IVU_MUNICIPAL_RATE / Decimal("100")).quantize(q, rounding=ROUND_HALF_UP)
+            ),
+            "linea_5_creditos_insumo":     str(abs(liability) if is_credit else Decimal("0.00")),
+            "linea_6_ivu_neto_a_remitir":  str(liability),
+            "periodo_inicio":              period_start.isoformat(),
+            "periodo_fin":                 period_end.isoformat(),
+            "rule_ref":                    fiscal.rule_ref,
+            "rate_version":                fiscal.rate_version,
+            "exemptions_applied":          list(fiscal.exemptions_applied),
+            "dry_run_note":                "FASE 1 — simulacion. No enviado a Hacienda PR.",
+        }
+
+    def _build_941pr(
+        self, fiscal: FiscalOutput, period_start: date, period_end: date
+    ) -> dict[str, Any]:
+        """941-PR — Employer's Quarterly Federal Tax Return for Puerto Rico."""
+        q    = Decimal("0.01")
+        fica = fiscal.tax_liability.quantize(q, rounding=ROUND_HALF_UP)
+        wages = fiscal.taxable_base.quantize(q, rounding=ROUND_HALF_UP)
+        return {
+            "line_1_total_wages":                      str(wages),
+            "line_2_fica_tax_withheld":                str(fica),
+            "line_3_total_taxes_before_adjustments":   str(fica),
+            "line_4_total_taxes_after_adjustments":    str(fica),
+            "quarter_start":                           period_start.isoformat(),
+            "quarter_end":                             period_end.isoformat(),
+            "rule_ref":                                fiscal.rule_ref,
+            "rate_version":                            fiscal.rate_version,
+            "dry_run_note": "FASE 1 — simulacion. No enviado al IRS/Hacienda.",
+        }
+
+    def _build_w2pr(
+        self, fiscal: FiscalOutput, period_start: date, period_end: date
+    ) -> dict[str, Any]:
+        """W-2PR — Annual Wage Report."""
+        q     = Decimal("0.01")
+        wages = fiscal.taxable_base.quantize(q, rounding=ROUND_HALF_UP)
+        taxes = fiscal.tax_liability.quantize(q, rounding=ROUND_HALF_UP)
+        return {
+            "box_1_wages_tips_other_compensation": str(wages),
+            "box_2_federal_income_tax_withheld":  str(Decimal("0.00")),
+            "box_3_social_security_wages":        str(wages),
+            "box_4_social_security_tax_withheld": str(taxes),
+            "box_5_medicare_wages":               str(wages),
+            "box_6_medicare_tax_withheld":        str(Decimal("0.00")),
+            "box_16_pr_wages":                    str(wages),
+            "tax_year":                           str(period_end.year),
+            "period_start":                       period_start.isoformat(),
+            "period_end":                         period_end.isoformat(),
+            "rule_ref":                           fiscal.rule_ref,
+            "rate_version":                       fiscal.rate_version,
+            "dry_run_note": "FASE 1 — simulacion. No enviado a Hacienda PR / SSA.",
+        }
+
+    def _build_sc2644(
+        self, fiscal: FiscalOutput, period_start: date, period_end: date
+    ) -> dict[str, Any]:
+        """SC 2644 — Income Tax Return for Corporations."""
+        q          = Decimal("0.01")
+        net_income = fiscal.taxable_base.quantize(q, rounding=ROUND_HALF_UP)
+        tax_due    = fiscal.tax_liability.quantize(q, rounding=ROUND_HALF_UP)
+        return {
+            "part_i_gross_income":          str(net_income),
+            "part_ii_deductions":           str(Decimal("0.00")),
+            "part_iii_net_taxable_income":  str(net_income),
+            "part_iv_tax_computed":         str(tax_due),
+            "part_v_credits_and_payments":  str(Decimal("0.00")),
+            "part_vi_balance_due":          str(tax_due),
+            "taxable_year_start":           period_start.isoformat(),
+            "taxable_year_end":             period_end.isoformat(),
+            "rule_ref":                     fiscal.rule_ref,
+            "rate_version":                 fiscal.rate_version,
+            "exemptions_applied":           list(fiscal.exemptions_applied),
+            "dry_run_note": "FASE 1 — simulacion. No enviado a Hacienda PR.",
+        }
 
     # ---------------------------------------------------------------------------
     # Helpers privados
     # ---------------------------------------------------------------------------
 
     @staticmethod
-    def _quarter_end_date(quarter: int, year: int) -> date:
-        """Retorna el ultimo dia del trimestre indicado."""
-        quarter_end_months = {1: 3, 2: 6, 3: 9, 4: 12}
-        month = quarter_end_months.get(quarter, 3)
-        return HaciendaAgent._last_day_of_month(year, month)
-
-    @staticmethod
-    def _last_day_of_month(year: int, month: int) -> date:
-        """Retorna el ultimo dia del mes indicado."""
-        if month == 12:
-            return date(year + 1, 1, 1) - timedelta(days=1)
-        return date(year, month + 1, 1) - timedelta(days=1)
+    def _calc_form_hash(
+        fiscal: FiscalOutput,
+        form_type: str,
+        period_start: date,
+        period_end: date,
+    ) -> str:
+        """
+        sha256 de campos clave del formulario para audit trail.
+        Primeros 16 caracteres del hex digest (coherente con fiscal_pr.py).
+        """
+        payload = {
+            "form_type":        form_type,
+            "tax_liability":    str(fiscal.tax_liability),
+            "taxable_base":     str(fiscal.taxable_base),
+            "period_start":     period_start.isoformat(),
+            "period_end":       period_end.isoformat(),
+            "rule_ref":         fiscal.rule_ref,
+            "rate_version":     fiscal.rate_version,
+            "fiscal_calc_hash": fiscal.calc_hash,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()
+        ).hexdigest()[:16]

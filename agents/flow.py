@@ -222,9 +222,9 @@ def _run_pipeline(
     # PASO 4: AUDITOR — verificacion cruzada independiente
     # -------------------------------------------------------------------------
     auditor_verification: AuditorVerification = auditor.verify(
-        debit=debit_entry,
-        credit=credit_entry,
-        intake=intake_output,
+        debit_entry=debit_entry,
+        credit_entry=credit_entry,
+        intake_output=intake_output,
     )
 
     orchestrator.log_decision(
