@@ -126,9 +126,27 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 # ---------------------------------------------------------------------------
 
 @app.get(
+    "/",
+    tags=["health"],
+    summary="Root health check",
+    response_description="Service status, system name, and version",
+)
+async def root_health_check() -> dict:
+    """
+    Root health check endpoint as specified in the API contract.
+    Returns HTTP 200 with system identification.
+    """
+    return {
+        "status": "ok",
+        "system": "bit-counting",
+        "version": "1.0.0",
+    }
+
+
+@app.get(
     "/health",
     tags=["health"],
-    summary="API health check",
+    summary="Detailed API health check",
     response_description="Service status and version",
 )
 async def health_check() -> dict:

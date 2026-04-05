@@ -284,6 +284,120 @@ async def get_ivu_summary(
 
 
 # ---------------------------------------------------------------------------
+# SUMMARY AND CONFIDENCE DISTRIBUTION ENDPOINTS (spec-required)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/summary",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Aggregate stats: total docs processed, pauses, decisions",
+)
+async def get_summary() -> dict:
+    """
+    Return aggregate system statistics:
+      - Total documents processed
+      - Active and resolved pauses
+      - Total Orchestrator decisions
+      - System uptime info
+    """
+    from api.routes.cpa_dashboard import _pauses, _orchestrator_singleton
+    from api.routes.documents import _document_store
+
+    total_docs = len(_document_store)
+    docs_processed = sum(
+        1 for d in _document_store.values()
+        if d.get("status") in ("processed", "paused")
+    )
+    active_pauses = sum(1 for p in _pauses.values() if p.get("status") == "ACTIVE")
+    resolved_pauses = sum(1 for p in _pauses.values() if p.get("status") == "RESOLVED")
+    total_decisions = _orchestrator_singleton.get_log_size()
+    cpa_review_decisions = len(
+        _orchestrator_singleton.get_decisions_requiring_cpa_review()
+    )
+
+    return {
+        "total_documents_submitted": total_docs,
+        "total_documents_processed": docs_processed,
+        "active_pauses":             active_pauses,
+        "resolved_pauses":           resolved_pauses,
+        "total_pauses":              active_pauses + resolved_pauses,
+        "total_orchestrator_decisions": total_decisions,
+        "decisions_requiring_cpa_review": cpa_review_decisions,
+        "generated_at":              datetime.utcnow().isoformat(),
+    }
+
+
+@router.get(
+    "/confidence",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Confidence distribution stats across all processed documents",
+)
+async def get_confidence_distribution() -> dict:
+    """
+    Return confidence distribution statistics for processed documents.
+
+    Buckets:
+      - very_high:  confidence >= 0.90
+      - high:       0.80 <= confidence < 0.90
+      - medium:     0.70 <= confidence < 0.80
+      - low:        0.60 <= confidence < 0.70
+      - very_low:   confidence < 0.60  (these should all be PAUSED)
+    """
+    from api.routes.documents import _document_store
+
+    buckets: dict[str, int] = {
+        "very_high": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "very_low": 0,
+    }
+    confidences: list[float] = []
+
+    for doc in _document_store.values():
+        intake = doc.get("intake_result") or {}
+        conf_str = intake.get("confidence")
+        if conf_str is None:
+            continue
+        try:
+            conf = float(conf_str)
+        except (ValueError, TypeError):
+            continue
+
+        confidences.append(conf)
+        if conf >= 0.90:
+            buckets["very_high"] += 1
+        elif conf >= 0.80:
+            buckets["high"] += 1
+        elif conf >= 0.70:
+            buckets["medium"] += 1
+        elif conf >= 0.60:
+            buckets["low"] += 1
+        else:
+            buckets["very_low"] += 1
+
+    total = len(confidences)
+    avg_confidence = sum(confidences) / total if total else 0.0
+    min_confidence = min(confidences) if confidences else 0.0
+    max_confidence = max(confidences) if confidences else 0.0
+
+    return {
+        "total_documents_with_confidence": total,
+        "average_confidence":  round(avg_confidence, 4),
+        "min_confidence":      round(min_confidence, 4),
+        "max_confidence":      round(max_confidence, 4),
+        "distribution":        buckets,
+        "distribution_pct": {
+            k: round(v / total * 100, 1) if total else 0.0
+            for k, v in buckets.items()
+        },
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
 

@@ -2,15 +2,25 @@
 # agents/actualizador.py
 # Agente ACTUALIZADOR del sistema Bit-Counting.
 #
-# GARANTIAS DE DISENO (Fase 1 — stub):
-#   - Monitorea 7 fuentes normativas definidas en el codigo.
-#   - Fase 1: modo stub — genera "sin actualizaciones" para todas las fuentes.
-#   - NUNCA auto-actualiza tax_rules — siempre retorna NormativeUpdateProposal
-#     con status="PENDING_CPA_REVIEW" para revision humana obligatoria.
-#   - Las propuestas incluyen: fuente, resumen, cambio propuesto, urgencia,
-#     y flag requires_legal_review para cambios con implicacion legal.
-#   - El CPA decide si aplicar o descartar cada propuesta. El ACTUALIZADOR
-#     no tiene acceso de escritura a tax_rules.
+# ROL:
+#   Monitorea 7 fuentes normativas diariamente. Detecta cambios.
+#   Genera update drafts. TODOS los cambios requieren aprobacion humana
+#   antes de activarse — nunca se auto-aplican.
+#
+# GARANTIAS DE DISENO:
+#   - requires_human_review es siempre True en todo MonitorResult.
+#   - NUNCA auto-aplica cambios a tax_rules. Solo genera drafts.
+#   - Los 7 stubs retornan no-change por defecto (Fase 1).
+#   - Todas las actualizaciones quedan en PENDING_REVIEW.
+#
+# FUENTES MONITOREADAS (7):
+#   1. hacienda.pr.gov
+#   2. irs.gov
+#   3. estado.pr.gov (LexJuris RSS)
+#   4. dtrh.pr.gov
+#   5. boletinestado.pr.gov
+#   6. congress.gov
+#   7. federalregister.gov
 # =============================================================================
 
 from __future__ import annotations

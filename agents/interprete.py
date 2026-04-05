@@ -35,6 +35,34 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# POLICY DRAFT — inmutable, siempre awaiting_confirmation=True al crearse
+# ---------------------------------------------------------------------------
+
+class PolicyDraft(BaseModel):
+    """
+    Borrador de politica generado por el INTERPRETE.
+
+    SIEMPRE tiene awaiting_confirmation=True hasta que el CPA llame a
+    confirm_policy(). La politica NO esta activa mientras sea un draft.
+    Es inmutable (frozen=True) — si se necesitan cambios, se genera un nuevo draft.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    draft_id:                     str
+    instruction_text:             str
+    cpa_license:                  str
+    interpreted_as:               str    # Interpretacion en lenguaje humano
+    policy_type:                  str    # CLASSIFICATION_OVERRIDE | THRESHOLD_CHANGE |
+                                         # EXEMPTION_ADD | ACCOUNT_REMAP
+    policy_rules:                 dict   # Reglas legibles por maquina
+    examples:                     tuple[dict, ...]  # Exactamente 3 ejemplos
+    awaiting_confirmation:        bool   # Siempre True hasta confirm_policy()
+    confidence_in_interpretation: Decimal
+    alternative_interpretations:  tuple[str, ...]
+
+
+# ---------------------------------------------------------------------------
 # EXCEPCION ESPECIFICA
 # ---------------------------------------------------------------------------
 
@@ -121,17 +149,239 @@ _REQUIRED_EXAMPLES = 3
 
 
 # ---------------------------------------------------------------------------
+# CONSTANTES Y HELPERS PARA interpret_instruction / confirm_policy
+# ---------------------------------------------------------------------------
+
+# Tipos de politica para los metodos nuevos (strings, no Enum)
+_ALL_POLICY_TYPES = [
+    "THRESHOLD_CHANGE",
+    "CLASSIFICATION_OVERRIDE",
+    "EXEMPTION_ADD",
+    "ACCOUNT_REMAP",
+]
+
+_POLICY_DESCRIPTIONS: dict[str, str] = {
+    "THRESHOLD_CHANGE":        "Cambio de umbral monetario para clasificacion de transacciones",
+    "CLASSIFICATION_OVERRIDE": "Override de clasificacion contable para proveedor o categoria",
+    "EXEMPTION_ADD":           "Adicion de exencion fiscal para proveedor o categoria",
+    "ACCOUNT_REMAP":           "Reclasificacion de transacciones a cuenta contable diferente",
+}
+
+# keywords → policy_type (string)
+_POLICY_KEYWORDS: dict[tuple, str] = {
+    ("capitaliz", "umbral", "limite", "threshold", "mayores a", "mayor de",
+     "menos de", "por encima", "por debajo", "hasta $", "sobre $"): "THRESHOLD_CHANGE",
+    ("siempre", "always", "son siempre", "clasifica como", "registrar como",
+     "tratar como", "son gastos", "son inventario", "son activos"): "CLASSIFICATION_OVERRIDE",
+    ("exento", "exempt", "exenci", "no aplica ivu", "sin ivu",
+     "libre de", "exentos de", "exenta de"): "EXEMPTION_ADD",
+    ("reclasifica", "reclassify", "mover a", "move to", "reasigna",
+     "cambia a", "cambiar a cuenta", "registrar en"): "ACCOUNT_REMAP",
+}
+
+
+def _infer_policy_type(instruction_text: str) -> str:
+    """Infiere el tipo de politica desde las palabras clave del texto."""
+    text_lower = instruction_text.lower()
+    best_score = 0
+    best_type = "CLASSIFICATION_OVERRIDE"
+    for keywords_tuple, ptype in _POLICY_KEYWORDS.items():
+        score = sum(1 for kw in keywords_tuple if kw in text_lower)
+        if score > best_score:
+            best_score = score
+            best_type = ptype
+    return best_type
+
+
+def _build_policy_rules(policy_type: str, instruction_text: str) -> dict[str, Any]:
+    """Construye el dict de reglas legible por maquina."""
+    text_lower = instruction_text.lower()
+
+    if policy_type == "THRESHOLD_CHANGE":
+        amounts = re.findall(r"\$[\d,]+(?:\.\d+)?|\b\d{3,}(?:\.\d+)?\b", instruction_text)
+        threshold = amounts[0].replace("$", "").replace(",", "") if amounts else "1000"
+        return {
+            "type": "THRESHOLD_CHANGE",
+            "threshold": threshold,
+            "conditions": [{"field": "amount", "operator": "greater_than", "value": threshold}],
+            "actions":    [{"type": "CAPITALIZE_ABOVE_THRESHOLD", "target": "1500"}],
+            "exceptions": [],
+        }
+
+    if policy_type == "CLASSIFICATION_OVERRIDE":
+        vendor_match = re.search(
+            r"compras? (?:a|de|en) ([A-Za-z][A-Za-z0-9\s]+?)(?:\s+son|\s+siempre|\s+are)",
+            instruction_text, re.IGNORECASE,
+        )
+        vendor = vendor_match.group(1).strip() if vendor_match else "VENDOR_NOT_SPECIFIED"
+        target_account, target_name = "1200", "Inventario"
+        if any(kw in text_lower for kw in ["gasto", "expense"]):
+            target_account, target_name = "5900", "Gastos Varios"
+        elif any(kw in text_lower for kw in ["activo", "asset", "equipo"]):
+            target_account, target_name = "1500", "Propiedad, Planta y Equipo"
+        return {
+            "type":       "CLASSIFICATION_OVERRIDE",
+            "vendor":     vendor,
+            "conditions": [{"field": "vendor", "operator": "equals", "value": vendor}],
+            "actions":    [{"type": "SET_ACCOUNT", "account": target_account, "name": target_name}],
+            "exceptions": [],
+        }
+
+    if policy_type == "EXEMPTION_ADD":
+        vendor_match = re.search(
+            r"(?:de|para|from|of)\s+([A-Za-z][A-Za-z0-9\s]+?)(?:\s+est[aá]n|\s+are|\s*$)",
+            instruction_text, re.IGNORECASE,
+        )
+        vendor = vendor_match.group(1).strip() if vendor_match else "VENDOR_NOT_SPECIFIED"
+        tax_type = "IVU"
+        return {
+            "type":       "EXEMPTION_ADD",
+            "vendor":     vendor,
+            "tax_type":   tax_type,
+            "conditions": [{"field": "vendor", "operator": "equals", "value": vendor}],
+            "actions":    [{"type": "APPLY_EXEMPTION", "tax_type": tax_type, "exempt": True}],
+            "exceptions": [],
+        }
+
+    if policy_type == "ACCOUNT_REMAP":
+        target_account, target_name = "5900", "Gastos Varios"
+        if any(kw in text_lower for kw in ["tecnolog", "technology", "tech"]):
+            target_account, target_name = "5900", "Gastos de Tecnologia"
+        elif any(kw in text_lower for kw in ["viaje", "travel"]):
+            target_account, target_name = "5700", "Gastos de Viaje"
+        vendor_match = re.search(
+            r"(?:compras? de|purchases? from|de)\s+([A-Za-z][A-Za-z0-9\s]+?)(?:\s+como|\s+as|\s+a\s)",
+            instruction_text, re.IGNORECASE,
+        )
+        vendor = vendor_match.group(1).strip() if vendor_match else "VENDOR_NOT_SPECIFIED"
+        return {
+            "type":       "ACCOUNT_REMAP",
+            "vendor":     vendor,
+            "conditions": [{"field": "vendor", "operator": "equals", "value": vendor}],
+            "actions":    [{"type": "REMAP_TO_ACCOUNT", "account": target_account, "name": target_name}],
+            "exceptions": [],
+        }
+
+    return {"type": policy_type, "conditions": [], "actions": [], "exceptions": []}
+
+
+def _make_draft_example(
+    policy_type: str,
+    policy_rules: dict,
+    vendor: str,
+    amount: Decimal,
+    real: bool,
+) -> dict:
+    """Construye un ejemplo individual para un PolicyDraft."""
+    source = "dato real del cliente" if real else "ejemplo hipotetico"
+    action = (policy_rules.get("actions") or [{}])[0]
+
+    if policy_type == "THRESHOLD_CHANGE":
+        threshold = Decimal(str(policy_rules.get("threshold", "1000")))
+        applies = amount > threshold
+        return {
+            "source": source, "vendor": vendor, "amount": str(amount), "applies": applies,
+            "before": f"Registrado como Gasto — ${amount}",
+            "after": (f"Capitalizado como Activo (1500) — ${amount}" if applies
+                      else f"Sin cambio — ${amount} <= umbral ${threshold}"),
+            "reasoning": f"${amount} {'supera' if applies else 'no supera'} el umbral de ${threshold}.",
+        }
+    if policy_type == "CLASSIFICATION_OVERRIDE":
+        rule_vendor = policy_rules.get("vendor", "")
+        applies = bool(rule_vendor) and rule_vendor.lower() in vendor.lower()
+        target = action.get("name", "Inventario")
+        return {
+            "source": source, "vendor": vendor, "amount": str(amount), "applies": applies,
+            "before": "Clasificado automaticamente por CLASIFICADOR",
+            "after": (f"Forzado a cuenta {action.get('account','1200')} ({target})" if applies
+                      else f"Sin cambio — '{vendor}' no coincide con '{rule_vendor}'"),
+            "reasoning": (f"'{vendor}' siempre se clasifica como {target}." if applies
+                          else f"Override solo aplica a '{rule_vendor}'."),
+        }
+    if policy_type == "EXEMPTION_ADD":
+        rule_vendor = policy_rules.get("vendor", "")
+        tax_type = policy_rules.get("tax_type", "IVU")
+        applies = bool(rule_vendor) and rule_vendor.lower() in vendor.lower()
+        return {
+            "source": source, "vendor": vendor, "amount": str(amount), "applies": applies,
+            "before": f"{tax_type} calculado sobre ${amount}",
+            "after": (f"Exento de {tax_type} — $0" if applies
+                      else f"Sin cambio — '{vendor}' no cubierto por exencion"),
+            "reasoning": (f"'{vendor}' esta exento de {tax_type}." if applies
+                          else f"Exencion aplica solo a '{rule_vendor}'."),
+        }
+    if policy_type == "ACCOUNT_REMAP":
+        rule_vendor = policy_rules.get("vendor", "")
+        target = action.get("name", "Gastos Varios")
+        applies = bool(rule_vendor) and rule_vendor.lower() in vendor.lower()
+        return {
+            "source": source, "vendor": vendor, "amount": str(amount), "applies": applies,
+            "before": "Clasificado en cuenta original",
+            "after": (f"Reclasificado a cuenta {action.get('account','5900')} ({target})" if applies
+                      else f"Sin cambio — '{vendor}' no coincide con '{rule_vendor}'"),
+            "reasoning": (f"Compras de '{vendor}' se remapean a {target}." if applies
+                          else f"Remap aplica solo a '{rule_vendor}'."),
+        }
+    return {"source": source, "vendor": vendor, "amount": str(amount), "applies": False,
+            "reasoning": "Ejemplo generado para politica generica."}
+
+
+def _generate_examples_for_draft(
+    policy_type: str,
+    policy_rules: dict,
+    instruction_text: str,
+    client_examples: list[dict],
+) -> tuple[dict, dict, dict]:
+    """Genera exactamente 3 ejemplos para el PolicyDraft."""
+    examples: list[dict] = []
+
+    if client_examples:
+        for raw in client_examples[:3]:
+            vendor = str(raw.get("vendor", "Proveedor Ejemplo"))
+            amount = Decimal(str(raw.get("amount", "500.00")))
+            examples.append(_make_draft_example(policy_type, policy_rules, vendor, amount, real=True))
+
+    hypothetical = [
+        ("Costco Wholesale", Decimal("1500.00")),
+        ("Amazon Business", Decimal("750.50")),
+        ("Acme Corp Services", Decimal("2000.00")),
+        ("Office Depot PR", Decimal("300.00")),
+        ("Tech Solutions LLC", Decimal("1200.00")),
+    ]
+    idx = 0
+    while len(examples) < 3 and idx < len(hypothetical):
+        vendor, amount = hypothetical[idx]
+        examples.append(_make_draft_example(policy_type, policy_rules, vendor, amount, real=False))
+        idx += 1
+
+    return (examples[0], examples[1], examples[2])
+
+
+# ---------------------------------------------------------------------------
 # AGENTE INTERPRETE
 # ---------------------------------------------------------------------------
 
 class InterpreteAgent(BaseAgent):
     """
-    Convierte instrucciones CPA en lenguaje natural a PolicyActivations formales.
+    INTERPRETE — Convierte instrucciones CPA en lenguaje natural a politicas formales.
 
-    Recibe CPAInstruction del CPA y produce PolicyActivation para el CENTINELA.
-    Nunca activa una politica sin: (a) confidence >= 0.70, (b) 3 ejemplos concretos,
-    (c) el campo awaiting_confirmation == False en la instruccion.
+    Flujo obligatorio de dos pasos:
+      1. interpret_instruction() → genera PolicyDraft con awaiting_confirmation=True
+         El CPA revisa los 3 ejemplos del draft.
+      2. confirm_policy(draft_id, cpa_license, confirmed=True) → activa la politica.
+
+    La politica NUNCA se activa sin confirmacion explícita del CPA.
+
+    Tambien expone interpret() para compatibilidad con el framework BaseAgent
+    (cuando CPAInstruction ya viene con awaiting_confirmation=False).
     """
+
+    def __init__(self) -> None:
+        """Inicializa el INTERPRETE con registros vacios."""
+        # Drafts pendientes: { draft_id → PolicyDraft }
+        self._pending_drafts: dict[str, PolicyDraft] = {}
+        # Politicas activadas: { policy_id → dict }
+        self._active_policies: dict[str, dict] = {}
 
     # --- Identidad ---
 
@@ -151,7 +401,190 @@ class InterpreteAgent(BaseAgent):
     def allowed_output_types(self) -> tuple[type, ...]:
         return (PolicyActivation,)
 
-    # --- Punto de entrada publico del agente ---
+    # -------------------------------------------------------------------------
+    # INTERPRET INSTRUCTION — paso 1 (genera draft, NO activa)
+    # -------------------------------------------------------------------------
+
+    def interpret_instruction(
+        self,
+        instruction_text: str,
+        cpa_license: str,
+        client_examples: list[dict],
+    ) -> PolicyDraft:
+        """
+        Interpreta la instruccion del CPA y genera un PolicyDraft con 3 ejemplos.
+
+        La politica NO esta activa tras este paso.
+        awaiting_confirmation es siempre True en el draft retornado.
+
+        Args:
+            instruction_text:  Instruccion del CPA en lenguaje natural.
+            cpa_license:       Numero de licencia del CPA.
+            client_examples:   Transacciones reales del cliente para ejemplos concretos.
+                               Si esta vacia, genera ejemplos hipoteticos.
+
+        Returns:
+            PolicyDraft inmutable con awaiting_confirmation=True y exactamente 3 ejemplos.
+        """
+        if not instruction_text or not instruction_text.strip():
+            raise ValueError("instruction_text no puede estar vacio.")
+        if not cpa_license or not cpa_license.strip():
+            raise ValueError("cpa_license no puede estar vacio.")
+
+        policy_type = _infer_policy_type(instruction_text)
+        policy_rules = _build_policy_rules(policy_type, instruction_text)
+
+        interpreted_as = (
+            f"Politica tipo {policy_type}: {_POLICY_DESCRIPTIONS.get(policy_type, policy_type)}. "
+            f"Instruccion: \"{instruction_text.strip()[:120]}\". "
+            f"Condiciones: {len(policy_rules.get('conditions', []))}, "
+            f"Acciones: {len(policy_rules.get('actions', []))}."
+        )
+
+        ex1, ex2, ex3 = _generate_examples_for_draft(
+            policy_type, policy_rules, instruction_text, client_examples
+        )
+
+        text_lower = instruction_text.lower()
+        matched = sum(
+            1 for kws, pt in _POLICY_KEYWORDS.items()
+            if pt == policy_type
+            for kw in kws
+            if kw in text_lower
+        )
+        confidence = min(
+            Decimal("1.00"),
+            Decimal("0.65") + Decimal(str(matched)) * Decimal("0.05"),
+        )
+
+        # Alternative interpretations (other policy types)
+        other_types = [
+            pt for pt in _ALL_POLICY_TYPES if pt != policy_type
+        ]
+        alt_interpretations = tuple(
+            f"Alternativa: podria interpretarse como {pt} — "
+            f"{_POLICY_DESCRIPTIONS.get(pt, pt)}"
+            for pt in other_types[:2]
+        )
+
+        draft_id = str(uuid.uuid4())
+        draft = PolicyDraft(
+            draft_id=draft_id,
+            instruction_text=instruction_text,
+            cpa_license=cpa_license,
+            interpreted_as=interpreted_as,
+            policy_type=policy_type,
+            policy_rules=policy_rules,
+            examples=(ex1, ex2, ex3),
+            awaiting_confirmation=True,       # ALWAYS True at creation
+            confidence_in_interpretation=confidence,
+            alternative_interpretations=alt_interpretations,
+        )
+
+        self._pending_drafts[draft_id] = draft
+
+        logger.info(
+            "[INTERPRETE] Draft generado: draft_id=%s tipo=%s confidence=%s cpa=%s.",
+            draft_id, policy_type, confidence, cpa_license,
+        )
+
+        return draft
+
+    # -------------------------------------------------------------------------
+    # CONFIRM POLICY — paso 2 (activa o descarta)
+    # -------------------------------------------------------------------------
+
+    def confirm_policy(
+        self,
+        draft_id: str,
+        cpa_license: str,
+        confirmed: bool,
+    ) -> dict:
+        """
+        Confirma o descarta un PolicyDraft pendiente.
+
+        SOLO este metodo puede activar una politica.
+        Una politica NUNCA se activa automaticamente.
+
+        Args:
+            draft_id:    ID del draft (generado por interpret_instruction).
+            cpa_license: Licencia del CPA. Debe coincidir con la del draft.
+            confirmed:   True para activar la politica. False para descartar.
+
+        Returns:
+            {"status": "ACTIVATED", "policy_id": str}  si confirmed=True.
+            {"status": "DISCARDED"}                     si confirmed=False.
+
+        Raises:
+            KeyError:   Si draft_id no existe.
+            ValueError: Si cpa_license no coincide con el draft.
+        """
+        if draft_id not in self._pending_drafts:
+            raise KeyError(
+                f"Draft '{draft_id}' no encontrado en drafts pendientes. "
+                "Use interpret_instruction() primero."
+            )
+
+        draft = self._pending_drafts[draft_id]
+
+        if draft.cpa_license != cpa_license:
+            raise ValueError(
+                f"cpa_license '{cpa_license}' no coincide con el draft "
+                f"('{draft.cpa_license}'). Solo el CPA que creo el draft puede confirmarlo."
+            )
+
+        del self._pending_drafts[draft_id]
+
+        if not confirmed:
+            logger.info("[INTERPRETE] Draft descartado: draft_id=%s.", draft_id)
+            return {"status": "DISCARDED"}
+
+        policy_id = str(uuid.uuid4())
+        policy_data: dict[str, Any] = {
+            "policy_id":      policy_id,
+            "draft_id":       draft_id,
+            "cpa_license":    cpa_license,
+            "policy_type":    draft.policy_type,
+            "interpreted_as": draft.interpreted_as,
+            "policy_rules":   draft.policy_rules,
+            "activated_at":   datetime.now(timezone.utc).isoformat(),
+            "client_id":      None,
+        }
+        self._active_policies[policy_id] = policy_data
+
+        logger.info(
+            "[INTERPRETE] Politica ACTIVADA: policy_id=%s tipo=%s cpa=%s.",
+            policy_id, draft.policy_type, cpa_license,
+        )
+
+        return {"status": "ACTIVATED", "policy_id": policy_id}
+
+    # -------------------------------------------------------------------------
+    # GET ACTIVE POLICIES
+    # -------------------------------------------------------------------------
+
+    def get_active_policies(self, client_id: Optional[str] = None) -> list[dict]:
+        """
+        Retorna lista de politicas activas, opcionalmente filtradas por cliente.
+
+        Args:
+            client_id: Si se provee, filtra solo politicas para ese cliente.
+                       Si es None, retorna todas las politicas activas.
+
+        Returns:
+            Lista de dicts con datos de cada politica activa.
+        """
+        policies = list(self._active_policies.values())
+        if client_id is not None:
+            policies = [
+                p for p in policies
+                if p.get("client_id") is None or p.get("client_id") == client_id
+            ]
+        return policies
+
+    # -------------------------------------------------------------------------
+    # INTERPRET — punto de entrada del framework (compatibilidad con BaseAgent)
+    # -------------------------------------------------------------------------
 
     def interpret(self, instruction: CPAInstruction) -> PolicyActivation:
         """

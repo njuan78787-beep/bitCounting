@@ -512,3 +512,147 @@ class SyntheticCalibrationTwin:
             "7100": "interest_expense",
         }
         return mapping.get(account_code)
+
+
+# ---------------------------------------------------------------------------
+# Convenience functions for use by calibration routes and tests
+# ---------------------------------------------------------------------------
+
+def get_synthetic_transactions() -> list[dict]:
+    """
+    Return the full calibration dataset as a plain list of dicts.
+
+    Each dict contains all fields needed to construct an IntakeOutput and
+    verify expected pipeline outcomes:
+      - id, vendor, amount, type, correct_account, correct_account_name
+      - is_capital, note, category
+
+    Returns:
+        List of 20 transaction dicts (copy of CALIBRATION_DATASET).
+    """
+    return list(CALIBRATION_DATASET)
+
+
+def run_calibration_suite() -> dict:
+    """
+    Run a lightweight calibration pass against the ClasificadorAgent.
+
+    Uses the existing SyntheticCalibrationTwin and the real ClasificadorAgent.
+    Wraps the result into a simple pass/fail dict for API and test consumption.
+
+    Returns:
+        dict with keys:
+          - total:   int — number of transactions in the dataset
+          - passed:  int — correctly classified
+          - failed:  int — misclassified
+          - errors:  int — unexpected exceptions during classification
+          - details: list[dict] — per-transaction result
+          - summary: str — human-readable summary line
+    """
+    from agents.clasificador import ClasificadorAgent
+
+    twin = SyntheticCalibrationTwin()
+
+    # Adapt ClasificadorAgent to the ClasificadorProtocol duck type.
+    # classify() in ClasificadorAgent takes an IntakeOutput and returns a tuple;
+    # here we build a minimal adapter that returns the expected dict shape.
+    class _AgentAdapter:
+        def __init__(self, agent: Any) -> None:
+            self._agent = agent
+
+        def classify(self, txn: dict[str, Any]) -> dict[str, Any]:
+            """
+            Build a minimal IntakeOutput-like dict call and invoke classify().
+            Returns {"account_code": str, "confidence": Decimal, "is_capital": bool}.
+            """
+            import uuid as _uuid
+            from datetime import datetime as _dt, timezone as _tz
+            from agents.messages import IntakeOutput, SourceFormat
+
+            amount = Decimal(str(txn.get("amount", "0")))
+            intake = IntakeOutput(
+                message_id=str(_uuid.uuid4()),
+                timestamp=_dt.now(_tz.utc),
+                source_agent="CALIBRATION",
+                target_agent="CENTINELA",
+                vendor=txn.get("vendor"),
+                date="2026-01-01",
+                amount=amount,
+                tax_amount=None,
+                currency="USD",
+                payment_method=None,
+                confidence=Decimal("0.90"),
+                missing_fields=(),
+                critical_fields_missing=False,
+                source_format=SourceFormat.JSON,
+            )
+            try:
+                debit, _credit = self._agent.classify(intake)
+                is_capital = debit.account_code.startswith("1")
+                return {
+                    "account_code": debit.account_code,
+                    "confidence": debit.confidence,
+                    "is_capital": is_capital,
+                }
+            except Exception as exc:
+                return {
+                    "account_code": "ERROR",
+                    "confidence": Decimal("0.00"),
+                    "is_capital": False,
+                    "_error": str(exc),
+                }
+
+    adapter = _AgentAdapter(ClasificadorAgent())
+    result = twin.run_calibration(adapter)
+
+    details = []
+    total = result.total_transactions
+    passed = result.correct_classifications
+    failed = total - passed - sum(
+        1 for w in result.wrong_classifications
+        if w.get("predicted_account") == "ERROR"
+    )
+    errors = sum(
+        1 for w in result.wrong_classifications
+        if w.get("predicted_account") == "ERROR"
+    )
+
+    for txn in CALIBRATION_DATASET:
+        wrong_match = next(
+            (w for w in result.wrong_classifications if w["cal_id"] == txn["id"]),
+            None,
+        )
+        if wrong_match:
+            status = "ERROR" if wrong_match["predicted_account"] == "ERROR" else "FAIL"
+            reason = (
+                f"Expected {wrong_match['expected_account']}, "
+                f"got {wrong_match['predicted_account']}"
+            )
+        else:
+            status = "PASS"
+            reason = f"Correctly classified as {txn['correct_account']}"
+
+        details.append({
+            "txn": f"{txn['id']} {txn['vendor']}",
+            "result": status,
+            "reason": reason,
+        })
+
+    summary = (
+        f"Calibration suite: {total} transactions | "
+        f"PASSED: {passed} | FAILED: {failed} | ERRORS: {errors} | "
+        f"Accuracy: {float(result.accuracy_rate)*100:.1f}% | "
+        f"Production-ready: {result.is_ready_for_production}"
+    )
+
+    return {
+        "total":   total,
+        "passed":  passed,
+        "failed":  failed,
+        "errors":  errors,
+        "details": details,
+        "summary": summary,
+        "accuracy_rate": str(result.accuracy_rate),
+        "is_ready_for_production": result.is_ready_for_production,
+        "recommended_confidence_threshold": str(result.recommended_confidence_threshold),
+    }

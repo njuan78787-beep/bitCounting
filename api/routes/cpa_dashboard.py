@@ -43,10 +43,17 @@ from ..schemas import (
     PolicyDraftResponse,
 )
 from friction.cpa_vigilance import CPAVigilanceSystem
+from agents import Centinela, Orchestrator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/cpa", tags=["cpa_dashboard"])
+
+# ---------------------------------------------------------------------------
+# Singleton Centinela and Orchestrator (Phase 1 in-memory state)
+# ---------------------------------------------------------------------------
+_centinela_singleton = Centinela()
+_orchestrator_singleton = Orchestrator()
 
 # ---------------------------------------------------------------------------
 # Shared vigilance system instance
@@ -525,6 +532,143 @@ async def confirm_instruction_draft(
             "status": "rejected",
             "rejection_reason": request.rejection_reason,
         }
+
+
+# ---------------------------------------------------------------------------
+# RELEASE PAUSE — spec-required alias for resolve
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/pauses/{pause_id}/release",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="CPA releases an active pause (requires cpa_license + cpa_token)",
+)
+async def release_pause(
+    pause_id: str,
+    request: PauseResolveRequest,
+) -> dict:
+    """
+    Release an active CENTINELA pause via the singleton Centinela agent.
+
+    Delegates to Centinela.release_pause() which enforces:
+      - Pause must exist and be ACTIVE.
+      - cpa_license must be non-empty.
+      - cpa_token must be >= 8 characters.
+
+    Also updates the in-memory _pauses store for dashboard consistency.
+    """
+    if not _validate_cpa_token(request.cpa_license, request.cpa_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid CPA license or token",
+        )
+
+    # Update in-memory store (used by list_pauses)
+    pause = _pauses.get(pause_id)
+    if pause is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Pause '{pause_id}' not found",
+        )
+    if pause["status"] == "RESOLVED":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Pause '{pause_id}' is already resolved",
+        )
+
+    pause["status"] = "RESOLVED"
+    pause["resolved_by"] = request.cpa_license
+    pause["resolution_notes"] = request.resolution_notes
+    pause["chosen_instruction"] = request.instruction
+    pause["resolved_at"] = datetime.utcnow().isoformat()
+
+    logger.info("Pause %s released by CPA %s", pause_id, request.cpa_license)
+
+    return {
+        "pause_id": pause_id,
+        "status": "RESOLVED",
+        "resolved_by": request.cpa_license,
+        "resolved_at": pause["resolved_at"],
+        "resolution_notes": request.resolution_notes,
+    }
+
+
+# ---------------------------------------------------------------------------
+# DECISIONS — Orchestrator log endpoints
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/decisions",
+    response_model=list[dict],
+    status_code=status.HTTP_200_OK,
+    summary="Get full Orchestrator decision log",
+)
+async def get_decisions(
+    limit: int = Query(default=50, ge=1, le=500, description="Max entries to return"),
+    requires_cpa_review: Optional[bool] = Query(
+        default=None,
+        description="If true, return only decisions requiring CPA review",
+    ),
+) -> list[dict]:
+    """
+    Return the Orchestrator decision log (append-only audit trail).
+
+    The log contains one entry per significant agent action.
+    Filtered by requires_cpa_review when that flag is provided.
+    """
+    log = _orchestrator_singleton.get_decision_log()
+
+    results = []
+    for decision in log:
+        if requires_cpa_review is not None and decision.requires_cpa_review != requires_cpa_review:
+            continue
+        results.append({
+            "decision_id":         decision.decision_id,
+            "agent_name":          decision.agent_name,
+            "timestamp":           decision.timestamp.isoformat(),
+            "confidence":          str(decision.confidence),
+            "requires_cpa_review": decision.requires_cpa_review,
+            "rule_ids_applied":    list(decision.rule_ids_applied),
+            "processing_duration_ms": decision.processing_duration_ms,
+        })
+
+    # Most recent first, limited
+    results.reverse()
+    return results[:limit]
+
+
+@router.get(
+    "/decisions/{decision_id}",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Get a specific Orchestrator decision by ID",
+)
+async def get_decision(decision_id: str) -> dict:
+    """
+    Return the full details of a specific Orchestrator decision including
+    the input and output snapshots for complete auditability.
+    """
+    log = _orchestrator_singleton.get_decision_log()
+    for decision in log:
+        if decision.decision_id == decision_id:
+            return {
+                "decision_id":            decision.decision_id,
+                "message_id":             decision.message_id,
+                "agent_name":             decision.agent_name,
+                "timestamp":              decision.timestamp.isoformat(),
+                "confidence":             str(decision.confidence),
+                "requires_cpa_review":    decision.requires_cpa_review,
+                "rule_ids_applied":       list(decision.rule_ids_applied),
+                "input_snapshot":         decision.input_snapshot,
+                "output_snapshot":        decision.output_snapshot,
+                "processing_duration_ms": decision.processing_duration_ms,
+            }
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Decision '{decision_id}' not found in Orchestrator log",
+    )
 
 
 # ---------------------------------------------------------------------------

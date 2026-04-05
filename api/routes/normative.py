@@ -243,6 +243,35 @@ async def check_normative_sources_now() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# SPEC-REQUIRED ALIASES
+# The spec uses /normative/updates and /normative/check; existing endpoints
+# are /pending-updates and /check-now.  These aliases delegate to the same
+# handlers for full compatibility.
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/updates",
+    response_model=list[NormativeUpdateResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List pending normative update proposals (spec alias for /pending-updates)",
+)
+async def list_updates() -> list[NormativeUpdateResponse]:
+    """Alias for GET /pending-updates — returns all pending normative updates."""
+    return await list_pending_updates()
+
+
+@router.post(
+    "/check",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Trigger a normative check for today's date (spec alias for /check-now)",
+)
+async def check_normative() -> dict:
+    """Alias for POST /check-now — triggers an immediate normative source check."""
+    return await check_normative_sources_now()
+
+
+# ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
 

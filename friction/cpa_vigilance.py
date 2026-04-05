@@ -262,6 +262,103 @@ class CPAVigilanceSystem:
         """Delegate to VigileAgent.should_flag()."""
         return self._agent.should_flag(transaction_amount, vendor, confidence)
 
+    def get_approval_level(self, transaction: dict[str, Any]) -> str:
+        """
+        Determine the friction level for a transaction dict.
+
+        Rules (in priority order):
+          1. If auditor_flagged or fraud_flags present → HIGH
+          2. If type is in ALWAYS_HIGH_TYPES (tax_filing, payroll, year_end_entry, etc.) → HIGH
+          3. amount > $10,000 → HIGH
+          4. $1,000 <= amount <= $10,000 → MEDIUM
+          5. amount < $1,000 → LOW
+
+        Args:
+            transaction: dict with at least 'amount' (str/Decimal) and
+                         optionally 'type', 'consequence_level', 'auditor_flagged'.
+
+        Returns:
+            "LOW", "MEDIUM", or "HIGH"
+        """
+        # Always-HIGH: auditor flags
+        if transaction.get("auditor_flagged") or transaction.get("fraud_flags"):
+            return "HIGH"
+
+        # Always-HIGH transaction types
+        _always_high = frozenset({
+            "tax_filing", "payroll", "year_end_entry", "audit_flag",
+            "payroll_tax", "quarterly_filing", "annual_filing",
+        })
+        txn_type = str(
+            transaction.get("type", "") or transaction.get("item_type", "")
+        ).lower()
+        if txn_type in _always_high:
+            return "HIGH"
+
+        # Explicit consequence level already set on the item
+        explicit = str(transaction.get("consequence_level", "")).upper()
+        if explicit in ("LOW", "MEDIUM", "HIGH"):
+            return explicit
+
+        # Amount-based
+        try:
+            amount = Decimal(str(transaction.get("amount", "0")))
+        except Exception:
+            amount = Decimal("0")
+
+        cfg = self._agent.config
+        if amount >= cfg.high_amount_threshold:
+            return "HIGH"
+        if amount >= cfg.medium_amount_threshold:
+            return "MEDIUM"
+        return "LOW"
+
+    def generate_random_verification_request(
+        self,
+        processed_transactions: list[dict[str, Any]],
+    ) -> "Optional[dict[str, Any]]":
+        """
+        Randomly select a correctly-processed transaction to send back to
+        the CPA as a verification request (~5% of calls).
+
+        The CPA does NOT know this is a test — the item looks like a normal
+        review queue entry.  If the CPA approves a correctly-classified item
+        they pass; if they reject it that is a vigilance failure.
+
+        Args:
+            processed_transactions: List of successfully processed transaction dicts.
+
+        Returns:
+            A verification request dict if triggered, else None.
+        """
+        import time as _time
+
+        if not processed_transactions:
+            return None
+
+        cfg = self._agent.config
+        if random.random() >= cfg.spot_check_probability:
+            return None
+
+        txn = random.choice(processed_transactions)
+
+        return {
+            "item_id": f"verify-{txn.get('transaction_id', 'unknown')}-{int(_time.time())}",
+            "item_type": "verification_check",
+            "transaction_id": txn.get("transaction_id"),
+            "vendor": txn.get("vendor", "Unknown"),
+            "amount": txn.get("amount", Decimal("0")),
+            "description": (
+                "Verificación de clasificación: revise si esta transacción fue "
+                "clasificada correctamente por el sistema."
+            ),
+            "consequence_level": self.get_approval_level(txn),
+            "status": "pending_review",
+            # Hidden internal flag — NOT exposed to CPA in API response
+            "is_verification": True,
+            "expected_action": "approved",
+        }
+
     def track_approval_time(
         self,
         cpa_license: str,
