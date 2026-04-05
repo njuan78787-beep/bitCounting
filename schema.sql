@@ -1,8 +1,8 @@
 -- =============================================================================
 -- SYSTEM:      Bit-Counting
 -- DESCRIPTION: Autonomous AI Accounting System for Puerto Rico
---              Schema de base de datos para el sistema autónomo de contabilidad
---              con supervisión de CPA, auditoría de decisiones de agentes IA,
+--              Schema de base de datos para el sistema autonomo de contabilidad
+--              con supervision de CPA, auditoria de decisiones de agentes IA,
 --              y cumplimiento con las regulaciones fiscales de Puerto Rico.
 -- DATE:        2026-04-04
 -- DATABASE:    PostgreSQL 14+
@@ -12,7 +12,7 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- =============================================================================
--- SECTION 1: TRIGGER FUNCTION — updated_at auto-update
+-- SECTION 1: TRIGGER FUNCTION - updated_at auto-update
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION trigger_set_updated_at()
@@ -24,7 +24,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- =============================================================================
--- SECTION 2: TABLE — cpa_partners
+-- SECTION 2: TABLE - cpa_partners
 -- =============================================================================
 
 CREATE TABLE cpa_partners (
@@ -46,15 +46,15 @@ CREATE TABLE cpa_partners (
 );
 
 COMMENT ON TABLE cpa_partners IS
-    'Socios contadores públicos autorizados (CPA) que supervisan y validan las '
-    'decisiones del sistema autónomo de contabilidad Bit-Counting en Puerto Rico.';
+    'Socios contadores publicos autorizados (CPA) que supervisan y validan las '
+    'decisiones del sistema autonomo de contabilidad Bit-Counting en Puerto Rico.';
 
 CREATE TRIGGER trg_cpa_partners_updated_at
     BEFORE UPDATE ON cpa_partners
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 3: TABLE — clients
+-- SECTION 3: TABLE - clients
 -- =============================================================================
 
 CREATE TABLE clients (
@@ -94,14 +94,14 @@ CREATE TABLE clients (
 COMMENT ON TABLE clients IS
     'Clientes empresariales registrados en el sistema Bit-Counting. Incluye '
     'entidades con distintas estructuras legales que operan bajo las regulaciones '
-    'fiscales de Puerto Rico y están asignadas a un socio CPA supervisor.';
+    'fiscales de Puerto Rico y estan asignadas a un socio CPA supervisor.';
 
 CREATE TRIGGER trg_clients_updated_at
     BEFORE UPDATE ON clients
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 4: TABLE — accounts (Chart of Accounts; self-referential parent)
+-- SECTION 4: TABLE - accounts (Chart of Accounts; self-referential parent)
 -- =============================================================================
 
 CREATE TABLE accounts (
@@ -132,8 +132,8 @@ CREATE TABLE accounts (
 );
 
 COMMENT ON TABLE accounts IS
-    'Catálogo de cuentas contables (Chart of Accounts) por cliente. Soporta '
-    'jerarquía de cuentas mediante referencia auto-referencial a cuenta padre, '
+    'Catalogo de cuentas contables (Chart of Accounts) por cliente. Soporta '
+    'jerarquia de cuentas mediante referencia auto-referencial a cuenta padre, '
     'siguiendo los principios de partida doble bajo GAAP y normas locales de PR.';
 
 CREATE TRIGGER trg_accounts_updated_at
@@ -141,7 +141,7 @@ CREATE TRIGGER trg_accounts_updated_at
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 5: TABLE — tax_rules (self-referential supersedes)
+-- SECTION 5: TABLE - tax_rules (self-referential supersedes)
 -- =============================================================================
 
 CREATE TABLE tax_rules (
@@ -175,7 +175,7 @@ CREATE TABLE tax_rules (
 
 COMMENT ON TABLE tax_rules IS
     'Reglas tributarias aplicables en Puerto Rico (IVU, ingreso corporativo, '
-    'nómina, etc.). Soporta versionado y cadena de supersesión para mantener '
+    'nomina, etc.). Soporta versionado y cadena de supersesion para mantener '
     'el historial normativo completo y auditable.';
 
 CREATE TRIGGER trg_tax_rules_updated_at
@@ -183,7 +183,7 @@ CREATE TRIGGER trg_tax_rules_updated_at
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 6: TABLE — tax_rule_metadata
+-- SECTION 6: TABLE - tax_rule_metadata
 -- =============================================================================
 
 CREATE TABLE tax_rule_metadata (
@@ -216,8 +216,8 @@ CREATE TABLE tax_rule_metadata (
 );
 
 COMMENT ON TABLE tax_rule_metadata IS
-    'Metadatos de procedencia y validación para cada regla tributaria. Registra '
-    'la fuente documental, estado de validación por CPA, y el checksum de '
+    'Metadatos de procedencia y validacion para cada regla tributaria. Registra '
+    'la fuente documental, estado de validacion por CPA, y el checksum de '
     'integridad del contenido normativo importado al sistema.';
 
 CREATE TRIGGER trg_tax_rule_metadata_updated_at
@@ -225,7 +225,7 @@ CREATE TRIGGER trg_tax_rule_metadata_updated_at
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 7: TABLE — transactions
+-- SECTION 7: TABLE - transactions
 -- =============================================================================
 
 CREATE TABLE transactions (
@@ -269,16 +269,16 @@ CREATE TABLE transactions (
 );
 
 COMMENT ON TABLE transactions IS
-    'Transacciones financieras de los clientes procesadas por el agente autónomo. '
-    'Incluye facturas, pagos, nómina, impuestos y ajustes. Cada transacción puede '
-    'estar vinculada a una regla tributaria y requiere aprobación CPA en ciertos casos.';
+    'Transacciones financieras de los clientes procesadas por el agente autonomo. '
+    'Incluye facturas, pagos, nomina, impuestos y ajustes. Cada transaccion puede '
+    'estar vinculada a una regla tributaria y requiere aprobacion CPA en ciertos casos.';
 
 CREATE TRIGGER trg_transactions_updated_at
     BEFORE UPDATE ON transactions
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 8: TABLE — journal_entries
+-- SECTION 8: TABLE - journal_entries
 -- (Balance check trigger defined after this table)
 -- =============================================================================
 
@@ -310,8 +310,8 @@ CREATE TABLE journal_entries (
 );
 
 COMMENT ON TABLE journal_entries IS
-    'Asientos contables de partida doble para cada transacción. Cada par de '
-    'débitos y créditos debe cuadrar por transacción (validado por trigger). '
+    'Asientos contables de partida doble para cada transaccion. Cada par de '
+    'debitos y creditos debe cuadrar por transaccion (validado por trigger). '
     'Es el registro contable fundamental del sistema de mayor general.';
 
 CREATE TRIGGER trg_journal_entries_updated_at
@@ -319,7 +319,7 @@ CREATE TRIGGER trg_journal_entries_updated_at
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 8a: TRIGGER — journal_entries double-entry balance check
+-- SECTION 8a: TRIGGER - journal_entries double-entry balance check
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION check_journal_entries_balance()
@@ -356,8 +356,8 @@ BEGIN
 
     IF v_debit_sum <> v_credit_sum THEN
         RAISE EXCEPTION
-            'Desequilibrio contable en transacción %: débitos=% créditos=%. '
-            'Los débitos y créditos deben ser iguales para transacciones publicadas.',
+            'Desequilibrio contable en transaccion %: debitos=% creditos=%. '
+            'Los debitos y creditos deben ser iguales para transacciones publicadas.',
             v_transaction_id, v_debit_sum, v_credit_sum;
     END IF;
 
@@ -370,7 +370,7 @@ CREATE TRIGGER trg_journal_entries_balance_check
     FOR EACH ROW EXECUTE FUNCTION check_journal_entries_balance();
 
 -- =============================================================================
--- SECTION 9: TABLE — agent_decisions (APPEND-ONLY)
+-- SECTION 9: TABLE - agent_decisions (APPEND-ONLY)
 -- =============================================================================
 
 CREATE TABLE agent_decisions (
@@ -409,11 +409,11 @@ CREATE TABLE agent_decisions (
 COMMENT ON TABLE agent_decisions IS
     'Registro inmutable (append-only) de todas las decisiones tomadas por los '
     'agentes de IA. Almacena los datos de entrada, salida, confianza y razonamiento '
-    'de cada decisión autónoma, junto con la revisión CPA cuando aplica. '
+    'de cada decision autonoma, junto con la revision CPA cuando aplica. '
     'No permite UPDATE ni DELETE para garantizar trazabilidad total.';
 
 -- =============================================================================
--- SECTION 9a: TRIGGER — agent_decisions immutability (no UPDATE or DELETE)
+-- SECTION 9a: TRIGGER - agent_decisions immutability (no UPDATE or DELETE)
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION prevent_agent_decisions_mutation()
@@ -421,11 +421,11 @@ RETURNS TRIGGER AS $$
 BEGIN
     IF TG_OP = 'UPDATE' THEN
         RAISE EXCEPTION
-            'La tabla agent_decisions es de solo adición (append-only). '
+            'La tabla agent_decisions es de solo adicion (append-only). '
             'No se permiten actualizaciones (UPDATE) en el registro de decisiones del agente.';
     ELSIF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION
-            'La tabla agent_decisions es de solo adición (append-only). '
+            'La tabla agent_decisions es de solo adicion (append-only). '
             'No se permiten eliminaciones (DELETE) en el registro de decisiones del agente.';
     END IF;
     RETURN NULL;
@@ -437,7 +437,7 @@ CREATE TRIGGER trg_agent_decisions_immutable
     FOR EACH ROW EXECUTE FUNCTION prevent_agent_decisions_mutation();
 
 -- =============================================================================
--- SECTION 10: TABLE — centinela_pauses
+-- SECTION 10: TABLE - centinela_pauses
 -- =============================================================================
 
 CREATE TABLE centinela_pauses (
@@ -485,16 +485,16 @@ CREATE TABLE centinela_pauses (
 );
 
 COMMENT ON TABLE centinela_pauses IS
-    'Pausas de supervisión generadas por el módulo Centinela cuando el agente '
-    'autónomo detecta situaciones que requieren revisión humana. Incluye umbrales '
-    'de confianza, categorías regulatorias y SLA de resolución por el CPA asignado.';
+    'Pausas de supervision generadas por el modulo Centinela cuando el agente '
+    'autonomo detecta situaciones que requieren revision humana. Incluye umbrales '
+    'de confianza, categorias regulatorias y SLA de resolucion por el CPA asignado.';
 
 CREATE TRIGGER trg_centinela_pauses_updated_at
     BEFORE UPDATE ON centinela_pauses
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 11: TABLE — cpa_instructions
+-- SECTION 11: TABLE - cpa_instructions
 -- =============================================================================
 
 CREATE TABLE cpa_instructions (
@@ -527,8 +527,8 @@ CREATE TABLE cpa_instructions (
 );
 
 COMMENT ON TABLE cpa_instructions IS
-    'Instrucciones emitidas por los socios CPA al sistema autónomo. Pueden aplicar '
-    'a un cliente específico (client_id) o a todos los clientes del CPA (NULL). '
+    'Instrucciones emitidas por los socios CPA al sistema autonomo. Pueden aplicar '
+    'a un cliente especifico (client_id) o a todos los clientes del CPA (NULL). '
     'Controlan el comportamiento del agente de acuerdo con criterios profesionales.';
 
 CREATE TRIGGER trg_cpa_instructions_updated_at
@@ -536,7 +536,7 @@ CREATE TRIGGER trg_cpa_instructions_updated_at
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 12: TABLE — cpa_policies (self-referential supersedes)
+-- SECTION 12: TABLE - cpa_policies (self-referential supersedes)
 -- =============================================================================
 
 CREATE TABLE cpa_policies (
@@ -571,16 +571,16 @@ CREATE TABLE cpa_policies (
 );
 
 COMMENT ON TABLE cpa_policies IS
-    'Políticas formalizadas derivadas de las instrucciones CPA. Definen reglas '
-    'de negocio estructuradas (JSONB) que el agente autónomo consulta en tiempo '
-    'de ejecución. Soporta versiones y cadena de supersesión de políticas.';
+    'Politicas formalizadas derivadas de las instrucciones CPA. Definen reglas '
+    'de negocio estructuradas (JSONB) que el agente autonomo consulta en tiempo '
+    'de ejecucion. Soporta versiones y cadena de supersesion de politicas.';
 
 CREATE TRIGGER trg_cpa_policies_updated_at
     BEFORE UPDATE ON cpa_policies
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 13: TABLE — error_cards
+-- SECTION 13: TABLE - error_cards
 -- =============================================================================
 
 CREATE TABLE error_cards (
@@ -626,8 +626,8 @@ CREATE TABLE error_cards (
 );
 
 COMMENT ON TABLE error_cards IS
-    'Tarjetas de error que documentan fallos del agente autónomo. Permiten '
-    'trazabilidad de errores, acciones correctivas y contribución anónima al '
+    'Tarjetas de error que documentan fallos del agente autonomo. Permiten '
+    'trazabilidad de errores, acciones correctivas y contribucion anonima al '
     'pool de aprendizaje colectivo (Eximia) para mejorar el sistema.';
 
 CREATE TRIGGER trg_error_cards_updated_at
@@ -635,7 +635,7 @@ CREATE TRIGGER trg_error_cards_updated_at
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 14: TABLE — behavior_patterns (no FK — privacy)
+-- SECTION 14: TABLE - behavior_patterns (no FK - privacy)
 -- =============================================================================
 
 CREATE TABLE behavior_patterns (
@@ -663,7 +663,7 @@ CREATE TABLE behavior_patterns (
 
 COMMENT ON TABLE behavior_patterns IS
     'Patrones de comportamiento contable derivados de error cards anonimizadas. '
-    'No contiene claves foráneas para preservar la privacidad de los clientes. '
+    'No contiene claves foraneas para preservar la privacidad de los clientes. '
     'Los IDs de tarjetas de error se almacenan como array UUID. Los patrones '
     'validados se comparten con el pool Eximia de aprendizaje colectivo.';
 
@@ -672,7 +672,7 @@ CREATE TRIGGER trg_behavior_patterns_updated_at
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 15: TABLE — confidence_calibration (no FK)
+-- SECTION 15: TABLE - confidence_calibration (no FK)
 -- =============================================================================
 
 CREATE TABLE confidence_calibration (
@@ -706,17 +706,17 @@ CREATE TABLE confidence_calibration (
 );
 
 COMMENT ON TABLE confidence_calibration IS
-    'Datos de calibración estadística de la confianza de cada agente por tipo '
-    'de decisión. Permite detectar y corregir sobreconfianza o subconfianza del '
-    'modelo. La tasa de precisión (accuracy_rate) se calcula automáticamente '
-    'como columna generada. No tiene claves foráneas para permitir datos históricos.';
+    'Datos de calibracion estadistica de la confianza de cada agente por tipo '
+    'de decision. Permite detectar y corregir sobreconfianza o subconfianza del '
+    'modelo. La tasa de precision (accuracy_rate) se calcula automaticamente '
+    'como columna generada. No tiene claves foraneas para permitir datos historicos.';
 
 CREATE TRIGGER trg_confidence_calibration_updated_at
     BEFORE UPDATE ON confidence_calibration
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 16: TABLE — normative_updates
+-- SECTION 16: TABLE - normative_updates
 -- =============================================================================
 
 CREATE TABLE normative_updates (
@@ -761,14 +761,14 @@ COMMENT ON TABLE normative_updates IS
     'Actualizaciones normativas detectadas por el sistema (cambios en tasas, '
     'nuevas leyes, modificaciones de reglas tributarias de Puerto Rico). '
     'Los IDs de reglas afectadas se almacenan como array UUID. Requieren '
-    'revisión y aprobación del CPA asignado antes de aplicarse al sistema.';
+    'revision y aprobacion del CPA asignado antes de aplicarse al sistema.';
 
 CREATE TRIGGER trg_normative_updates_updated_at
     BEFORE UPDATE ON normative_updates
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
 -- =============================================================================
--- SECTION 17: TABLE — approval_log
+-- SECTION 17: TABLE - approval_log
 -- =============================================================================
 
 CREATE TABLE approval_log (
@@ -808,10 +808,10 @@ CREATE TABLE approval_log (
 );
 
 COMMENT ON TABLE approval_log IS
-    'Registro de auditoría completo de todas las acciones de aprobación realizadas '
-    'por los socios CPA. Captura latencia de decisión, puntuación de fricción y '
+    'Registro de auditoria completo de todas las acciones de aprobacion realizadas '
+    'por los socios CPA. Captura latencia de decision, puntuacion de friccion y '
     'factores contextuales para medir la eficiencia y calidad del proceso de '
-    'supervisión humana sobre el agente autónomo.';
+    'supervision humana sobre el agente autonomo.';
 
 CREATE TRIGGER trg_approval_log_updated_at
     BEFORE UPDATE ON approval_log
@@ -928,5 +928,5 @@ CREATE INDEX idx_approval_log_client_created_desc
     ON approval_log (client_id, created_at DESC);
 
 -- =============================================================================
--- END OF SCHEMA — Bit-Counting Autonomous AI Accounting System for Puerto Rico
+-- END OF SCHEMA - Bit-Counting Autonomous AI Accounting System for Puerto Rico
 -- =============================================================================
