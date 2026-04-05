@@ -1,23 +1,31 @@
 # =============================================================================
 # agents/interprete.py
-# Agente INTERPRETE del sistema Bit-Counting.
+# Agente INTERPRETE — Convierte instrucciones CPA a politicas formales.
 #
 # GARANTIAS DE DISENO:
-#   - NUNCA inventa reglas — solo mapea instrucciones CPA a PolicyType conocidos.
-#   - Siempre requiere 3 ejemplos concretos antes de activar una politica.
-#   - Registra cada interpretacion con confidence score.
-#   - Si confidence < 0.70, lanza InterpreteAmbiguityError (solicitud de
-#     clarificacion estructurada). Nunca actua bajo ambiguedad.
-#   - No accede a fuentes externas, no llama a otros agentes directamente.
+#   - NUNCA activa una politica sin confirmacion explícita del CPA.
+#   - Siempre genera exactamente 3 ejemplos concretos antes de confirmar.
+#   - La PolicyDraft es frozen=True — inmutable una vez generada.
+#   - La confirmacion del CPA es requerida con el mismo numero de licencia.
+#   - Las politicas activas se almacenan en un dict interno no expuesto.
+#
+# Metodos principales:
+#   interpret_instruction(instruction_text, cpa_license, client_examples) -> PolicyDraft
+#   confirm_policy(draft_id, cpa_license, confirmed) -> dict
+#   get_active_policies(client_id=None) -> list[dict]
 # =============================================================================
 
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
+
+from pydantic import BaseModel, ConfigDict
 
 from .base import BaseAgent
 from .exceptions import BitCountingAgentError
