@@ -120,3 +120,18 @@ class ImmutableLogError(BitCountingAgentError):
             "El log del ORQUESTADOR es append-only — las decisiones son inmutables. "
             "El audit trail nunca puede ser modificado ni eliminado."
         )
+
+
+class IntakeValidationError(BitCountingAgentError):
+    """
+    El agente INTAKE no pudo extraer campos criticos del documento.
+    El flujo se detiene — no se puede continuar sin amount y date.
+    """
+    def __init__(self, missing_critical: list[str], source_format: str) -> None:
+        self.missing_critical = missing_critical
+        self.source_format = source_format
+        super().__init__(
+            f"INTAKE: campos criticos faltantes {missing_critical} en documento "
+            f"de formato '{source_format}'. El flujo no puede continuar. "
+            "Solicitar al usuario los datos faltantes."
+        )
