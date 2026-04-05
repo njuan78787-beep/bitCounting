@@ -44,6 +44,11 @@ def vigilance() -> CPAVigilanceSystem:
     return CPAVigilanceSystem()
 
 
+def _make_vigilance(rate: float = 0.05) -> CPAVigilanceSystem:
+    """Helper: create a CPAVigilanceSystem with a custom spot-check probability."""
+    return CPAVigilanceSystem(config=FrictionConfig(spot_check_probability=rate))
+
+
 @pytest.fixture
 def low_transaction() -> dict:
     """A LOW-consequence transaction (amount < $1,000)."""
@@ -343,7 +348,7 @@ def test_random_verification_triggered_approximately_5_percent():
     # Use a fixed seed for reproducibility
     random.seed(42)
 
-    vigilance = CPAVigilanceSystem(verification_rate=0.05)
+    vigilance = _make_vigilance(rate=0.05)
 
     processed = [
         {
@@ -383,7 +388,7 @@ def test_random_verification_request_has_required_fields():
     import random
     random.seed(1)  # Seed that triggers verification
 
-    vigilance = CPAVigilanceSystem(verification_rate=1.0)  # Always trigger
+    vigilance = _make_vigilance(rate=1.0)  # Always trigger
 
     processed = [
         {
@@ -412,7 +417,7 @@ def test_random_verification_has_is_verification_flag():
     The internal verification flag must be present so the system can track
     outcomes even though it's hidden from the CPA.
     """
-    vigilance = CPAVigilanceSystem(verification_rate=1.0)
+    vigilance = _make_vigilance(rate=1.0)
 
     processed = [
         {
@@ -431,16 +436,10 @@ def test_random_verification_has_is_verification_flag():
 
 def test_random_verification_zero_rate_never_triggers():
     """A vigilance system with rate=0 must never trigger verification."""
-    # Note: We can't set rate=0 directly since CPAVigilanceSystem takes verification_rate
-    # but the underlying VigileAgent config.spot_check_probability is used.
-    # Test with extremely low rate instead.
     import random
     random.seed(42)
 
-    # Use 0% rate via overriding the config
-    from friction.cpa_vigilance import FrictionConfig
-    config = FrictionConfig(spot_check_probability=0.0)
-    vigilance = CPAVigilanceSystem(config=config)
+    vigilance = _make_vigilance(rate=0.0)
 
     processed = [{"transaction_id": "txn-never", "vendor": "V", "amount": Decimal("100")}]
 

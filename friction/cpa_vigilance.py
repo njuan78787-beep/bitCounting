@@ -394,25 +394,89 @@ class CPAVigilanceSystem:
         level: str,
     ) -> dict[str, str]:
         """
-        Generate a challenge question for HIGH-friction items.
+        Generate a friction challenge appropriate for the given level.
 
-        The CPA must answer the question correctly before approving.
-        Returns a dict with 'question' and 'correct_answer' keys.
+        LOW:
+            {"type": "CLICK", "instruction": "Confirmar"}
+
+        MEDIUM:
+            {"type": "EXPAND", "instruction": "Expandir detalles primero",
+             "detail_key": <item_id or transaction_id>}
+
+        HIGH:
+            {"type": "QUESTION", "question": <question>, "correct_answer": <answer>}
+
+        The HIGH question is about the specific transaction so the CPA must
+        actually read and understand it before answering.
+
+        Args:
+            item:  Transaction/review-item dict.
+            level: "LOW", "MEDIUM", or "HIGH".
+
+        Returns:
+            Challenge dict with 'type' key and level-specific fields.
         """
+        level = level.upper()
+
+        if level == "LOW":
+            return {
+                "type": "CLICK",
+                "instruction": "Confirmar",
+            }
+
+        if level == "MEDIUM":
+            detail_key = item.get("item_id") or item.get("transaction_id") or "detail"
+            return {
+                "type": "EXPAND",
+                "instruction": "Expandir detalles primero",
+                "detail_key": str(detail_key),
+            }
+
+        # HIGH — must answer a question about the transaction
         amount = item.get("amount", "?")
         vendor = item.get("vendor", "desconocido")
-        account = item.get("detail", {}).get("account_code", "?")
-
-        question = (
-            f"Para la transacción de ${amount} del proveedor '{vendor}': "
-            f"¿Cuál es el código de cuenta asignado?"
+        account = (
+            item.get("account_code")
+            or (item.get("detail") or {}).get("account_code", "?")
         )
-        correct_answer = str(account)
+        account_name = (
+            item.get("account_name")
+            or (item.get("detail") or {}).get("account_name", "cuenta contable")
+        )
+
+        # Deterministic question based on amount
+        try:
+            amount_dec = Decimal(str(amount))
+            seed = int(amount_dec) % 4
+        except Exception:
+            seed = 0
+
+        if seed == 0:
+            question = f"¿Cuál es el monto total de esta transacción de '{vendor}'?"
+            correct_answer = str(amount)
+        elif seed == 1:
+            question = f"¿A qué código de cuenta se clasificó esta transacción de '{vendor}'?"
+            correct_answer = str(account)
+        elif seed == 2:
+            is_capital = False
+            try:
+                is_capital = Decimal(str(amount)) >= Decimal("2500.00")
+            except Exception:
+                pass
+            question = (
+                f"Esta transacción de '{vendor}' por ${amount}: "
+                f"¿es gasto operacional o activo de capital?"
+            )
+            correct_answer = "activo de capital" if is_capital else "gasto operacional"
+        else:
+            question = f"¿Cuál es el nombre de la cuenta contable de esta transacción de '{vendor}'?"
+            correct_answer = str(account_name)
 
         return {
+            "type": "QUESTION",
             "question": question,
             "correct_answer": correct_answer,
-            "hint": "Revise la sección 'detail' de la transacción.",
+            "hint": "Revise los detalles de la transacción antes de responder.",
         }
 
     def get_cpa_vigilance_metrics(self, cpa_license: str) -> dict[str, Any]:
