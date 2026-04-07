@@ -377,10 +377,16 @@ class OrchestratorV2:
                 transaction_ref=job.trace_id,
                 transaction_date=result.date or date.today().isoformat(),
                 journal_entries=tuple(journal_entries),
-                ivu_base_amount=result.amount,
+                ivu_base_amount=(
+                    result.amount
+                    if fiscal_result.total_tax_due is not None
+                    and fiscal_result.total_tax_due > 0
+                    else None
+                ),
                 ivu_reported_amount=(
                     fiscal_result.total_tax_due
-                    if fiscal_result.total_tax_due > 0
+                    if fiscal_result.total_tax_due is not None
+                    and fiscal_result.total_tax_due > 0
                     else None
                 ),
                 vendor=result.vendor,
