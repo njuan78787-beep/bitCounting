@@ -1,0 +1,23 @@
+[run]
+source = agents, api, tax_rules
+omit =
+    # Internal test files (not part of the production codebase)
+    agents/tests*.py
+    agents/tests_*.py
+    api/tests*.py
+    api/tests_*.py
+    tax_rules/tests*.py
+    tax_rules/tests_*.py
+    # Legacy / unused modules not yet integrated into the pipeline
+    agents/hacienda.py
+    agents/nomina.py
+    agents/interprete.py
+    agents/estados.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    \.\.\.
+    @overload
