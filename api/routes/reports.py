@@ -20,8 +20,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from ..auth import TokenUser
+from ..dependencies import get_current_user, verify_client_scope
 from ..schemas import (
     BalanceSheetResponse,
     CashFlowResponse,
@@ -50,12 +52,14 @@ async def get_balance_sheet(
         default=None,
         description="ISO 8601 date (YYYY-MM-DD). Defaults to today.",
     ),
+    user: TokenUser = Depends(get_current_user),
 ) -> BalanceSheetResponse:
     """
     Return a balance sheet for the specified client as of the given date.
     Follows the GAAP accounting equation: Assets = Liabilities + Equity.
     """
     _require_client(client_id)
+    verify_client_scope(user, client_id)
     effective_date = as_of_date or datetime.utcnow().date().isoformat()
 
     # Phase 1: synthetic balanced balance sheet
@@ -125,11 +129,13 @@ async def get_income_statement(
     client_id: str = Query(..., description="Client UUID"),
     period_start: str = Query(..., description="ISO 8601 start date"),
     period_end: str = Query(..., description="ISO 8601 end date"),
+    user: TokenUser = Depends(get_current_user),
 ) -> IncomeStatementResponse:
     """
     Return a profit & loss statement for the specified client and period.
     """
     _require_client(client_id)
+    verify_client_scope(user, client_id)
     _validate_period(period_start, period_end)
 
     revenue = {
@@ -191,11 +197,13 @@ async def get_cash_flow(
     client_id: str = Query(..., description="Client UUID"),
     period_start: str = Query(..., description="ISO 8601 start date"),
     period_end: str = Query(..., description="ISO 8601 end date"),
+    user: TokenUser = Depends(get_current_user),
 ) -> CashFlowResponse:
     """
     Return a cash flow statement (indirect method) for the specified period.
     """
     _require_client(client_id)
+    verify_client_scope(user, client_id)
     _validate_period(period_start, period_end)
 
     operating_activities = {
@@ -249,6 +257,7 @@ async def get_cash_flow(
 async def get_ivu_summary(
     client_id: str = Query(..., description="Client UUID"),
     period: str = Query(..., description="Period in YYYY-MM format"),
+    user: TokenUser = Depends(get_current_user),
 ) -> IVUSummaryResponse:
     """
     Return a summary of IVU (Puerto Rico sales tax) collected from customers
@@ -256,6 +265,7 @@ async def get_ivu_summary(
     Used to prepare Form SC 2915 (Planilla Mensual de IVU).
     """
     _require_client(client_id)
+    verify_client_scope(user, client_id)
 
     # Validate period format
     if not _is_valid_period(period):

@@ -30,7 +30,9 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from ..auth import TokenUser
+from ..dependencies import get_current_user
 
 from ..schemas import (
     CPAApprovalRequest,
@@ -163,6 +165,7 @@ def _validate_cpa_token(cpa_license: str, cpa_token: str) -> bool:
 async def list_pauses(
     cpa_license: Optional[str] = Query(default=None),
     status_filter: Optional[str] = Query(default="active", alias="status"),
+    user: TokenUser = Depends(get_current_user),
 ) -> list[PauseResponse]:
     """
     Return CENTINELA pauses that need CPA attention.
@@ -245,6 +248,7 @@ async def resolve_pause(
 )
 async def get_review_queue(
     cpa_license: Optional[str] = Query(default=None),
+    user: TokenUser = Depends(get_current_user),
 ) -> list[dict]:
     """
     Return all items pending CPA review, sorted by SLA deadline (soonest first).
@@ -268,6 +272,7 @@ async def get_review_queue(
 async def approve_item(
     item_id: str,
     request: CPAApprovalRequest,
+    _user: TokenUser = Depends(get_current_user),
 ) -> dict:
     """
     Process a CPA approval with friction levels:
@@ -386,6 +391,7 @@ async def approve_item(
 )
 async def get_cpa_metrics(
     cpa_license: str = Query(..., description="CPA license number"),
+    _user: TokenUser = Depends(get_current_user),
 ) -> CPAMetricsResponse:
     """
     Return vigilance and performance metrics for a specific CPA.

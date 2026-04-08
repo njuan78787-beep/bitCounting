@@ -3,10 +3,17 @@
 # Transaction management endpoints for Bit-Counting.
 #
 # Endpoints:
-#   GET  /api/v1/transactions                          — paginated list
-#   POST /api/v1/transactions                          — manual creation
-#   GET  /api/v1/transactions/{id}/journal-entries     — double-entry journal
-#   GET  /api/v1/transactions/{id}/tax-analysis        — FISCAL PR output
+#   POST /api/v1/transactions/upload               — sube documento, inicia ORQUESTADOR
+#   GET  /api/v1/transactions/{id}                 — estado y trace completo
+#   GET  /api/v1/transactions                      — lista con filtros (fecha, estado, cliente)
+#   POST /api/v1/transactions                      — creación manual
+#   GET  /api/v1/transactions/{id}/journal-entries — double-entry journal
+#   GET  /api/v1/transactions/{id}/tax-analysis    — FISCAL PR output
+#
+# SEGURIDAD:
+#   - Todos los endpoints requieren JWT con mfa_verified=True
+#   - verify_client_scope aplicado: usuarios solo ven sus propios datos
+#   - Inputs validados con Pydantic — nunca string concatenation
 # =============================================================================
 
 from __future__ import annotations
@@ -17,8 +24,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 
+from ..auth import TokenUser
+from ..dependencies import get_current_user, rate_limit, verify_client_scope
 from ..schemas import (
     JournalEntryResponse,
     TaxAnalysisResponse,
@@ -31,6 +41,17 @@ from ..schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/transactions", tags=["transactions"])
+
+
+# ---------------------------------------------------------------------------
+# Schema para upload
+# ---------------------------------------------------------------------------
+
+class DocumentUploadRequest(BaseModel):
+    """Request body para POST /upload — inicia el flujo ORQUESTADOR."""
+    raw_text:      str   = Field(min_length=1, description="Texto del documento")
+    client_id:     str   = Field(min_length=1, description="UUID del cliente")
+    source_format: str   = Field(default="UNKNOWN", description="PDF, CSV, JSON, etc.")
 
 # ---------------------------------------------------------------------------
 # In-memory transaction store (Phase 1)
@@ -89,6 +110,79 @@ _make_demo_transactions()
 # ENDPOINTS
 # ---------------------------------------------------------------------------
 
+@router.post(
+    "/upload",
+    response_model=TransactionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Subir documento e iniciar flujo ORQUESTADOR",
+)
+async def upload_document(
+    body:  DocumentUploadRequest,
+    user:  TokenUser = Depends(get_current_user),
+    _rate: None      = Depends(rate_limit("transactions:upload")),
+) -> TransactionResponse:
+    """
+    Sube un documento de texto e inicia el flujo completo:
+    INTAKE → CENTINELA → CLASIFICADOR → AUDITOR → FISCAL PR.
+
+    El usuario solo puede subir documentos para su propio `client_id`.
+
+    Retorna la transacción creada con status=pending mientras el pipeline procesa.
+    Phase 2: integración real con OrchestratorV2.
+    """
+    verify_client_scope(user, body.client_id)
+
+    transaction_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+
+    record = {
+        "transaction_id": transaction_id,
+        "client_id":      body.client_id,
+        "vendor":         None,
+        "amount":         Decimal("0.00"),
+        "date":           now.date().isoformat(),
+        "status":         TransactionStatus.PENDING,
+        "account_code":   None,
+        "account_name":   None,
+        "confidence":     None,
+        "created_at":     now,
+        "updated_at":     now,
+        "source_format":  body.source_format,
+    }
+    _transaction_store[transaction_id] = record
+
+    logger.info(
+        "UPLOAD: transacción %s iniciada para cliente %s por usuario %s",
+        transaction_id, body.client_id, user.username,
+    )
+    return _dict_to_transaction_response(record)
+
+
+@router.get(
+    "/{transaction_id}",
+    response_model=TransactionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Estado y trace completo de una transacción",
+)
+async def get_transaction(
+    transaction_id: str,
+    user:           TokenUser = Depends(get_current_user),
+) -> TransactionResponse:
+    """
+    Retorna el estado actual y el trace completo de una transacción.
+
+    El usuario solo puede acceder a transacciones de su propio `client_id`.
+    """
+    txn = _transaction_store.get(transaction_id)
+    if txn is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Transacción '{transaction_id}' no encontrada",
+        )
+    verify_client_scope(user, txn["client_id"])
+    return _dict_to_transaction_response(txn)
+
+
 @router.get(
     "",
     response_model=TransactionListResponse,
@@ -112,15 +206,25 @@ async def list_transactions(
     ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=500),
+    user: TokenUser = Depends(get_current_user),
 ) -> TransactionListResponse:
     """
     Return a paginated list of transactions, optionally filtered by client,
     status, and date range.
+
+    CLIENT users can only see their own transactions — client_id is enforced.
     """
     items = list(_transaction_store.values())
 
+    # Scope enforcement: CLIENT solo ve sus propias transacciones
     if client_id:
+        verify_client_scope(user, client_id)
         items = [t for t in items if t.get("client_id") == client_id]
+    elif user.client_id:
+        # Sin filtro de cliente: restringir automáticamente al cliente del usuario
+        from ..auth import Role as _Role
+        if user.role == _Role.CLIENT:
+            items = [t for t in items if t.get("client_id") == user.client_id]
     if status_filter:
         items = [t for t in items if t.get("status") == status_filter]
     if date_from:
@@ -151,12 +255,14 @@ async def list_transactions(
 )
 async def create_transaction(
     request: TransactionCreateRequest,
+    user:    TokenUser = Depends(get_current_user),
 ) -> TransactionResponse:
     """
     Manually create a transaction record.  This skips the document intake
     pipeline and is intended for transactions entered directly (e.g., bank
     reconciliation corrections).
     """
+    verify_client_scope(user, request.client_id)
     transaction_id = str(uuid.uuid4())
     now = datetime.utcnow()
 
@@ -185,7 +291,10 @@ async def create_transaction(
     status_code=status.HTTP_200_OK,
     summary="Get double-entry journal entries for a transaction",
 )
-async def get_journal_entries(transaction_id: str) -> list[JournalEntryResponse]:
+async def get_journal_entries(
+    transaction_id: str,
+    user: TokenUser = Depends(get_current_user),
+) -> list[JournalEntryResponse]:
     """
     Return the double-entry journal entries generated by the CLASIFICADOR
     for the specified transaction.
@@ -196,6 +305,7 @@ async def get_journal_entries(transaction_id: str) -> list[JournalEntryResponse]
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Transaction '{transaction_id}' not found",
         )
+    verify_client_scope(user, txn["client_id"])
 
     amount = txn.get("amount", Decimal("0.00"))
     account_code = txn.get("account_code") or "5900"
@@ -246,7 +356,10 @@ async def get_journal_entries(transaction_id: str) -> list[JournalEntryResponse]
     status_code=status.HTTP_200_OK,
     summary="Get FISCAL PR tax analysis for a transaction",
 )
-async def get_tax_analysis(transaction_id: str) -> TaxAnalysisResponse:
+async def get_tax_analysis(
+    transaction_id: str,
+    user: TokenUser = Depends(get_current_user),
+) -> TaxAnalysisResponse:
     """
     Return the Puerto Rico tax analysis produced by the FISCAL PR agent
     for the specified transaction, including applicable form reference.
@@ -257,6 +370,7 @@ async def get_tax_analysis(transaction_id: str) -> TaxAnalysisResponse:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Transaction '{transaction_id}' not found",
         )
+    verify_client_scope(user, txn["client_id"])
 
     amount = txn.get("amount", Decimal("0.00"))
     txn_date = txn.get("date", "2026-01-01")

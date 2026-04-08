@@ -12,11 +12,19 @@
 #   - Normative monitor watches 7 PR regulatory sources
 #
 # Routers:
+#   /auth               — autenticación JWT + MFA TOTP
 #   /api/v1/documents   — document processing (intake pipeline)
 #   /api/v1/transactions — transaction management
-#   /api/v1/cpa         — CPA dashboard (pauses, review queue, metrics)
+#   /api/v1/centinela   — pausas CENTINELA (separado del CPA dashboard)
+#   /api/v1/cpa         — CPA dashboard (review queue, instrucciones, métricas)
 #   /api/v1/reports     — financial reports (balance sheet, P&L, cash flow, IVU)
 #   /api/v1/normative   — normative change monitoring
+#   /api/v1/admin       — administración (solo EXIMIA_ADMIN)
+#
+# SEGURIDAD:
+#   - SecurityHeadersMiddleware: HSTS, CSP, X-Frame-Options, etc.
+#   - AccessLogMiddleware: user_id, endpoint, response_time_ms en cada request
+#   - CORS restringido a orígenes conocidos (env var en producción)
 # =============================================================================
 
 from __future__ import annotations
@@ -30,7 +38,9 @@ from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .middleware import AccessLogMiddleware, SecurityHeadersMiddleware
 from .routes import documents, transactions, cpa_dashboard, reports, normative
+from .routes import auth_router, centinela, admin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +85,18 @@ app = FastAPI(
 # CORS MIDDLEWARE — allows React dashboard to communicate with the API
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# SECURITY MIDDLEWARES (se aplican en orden inverso al que se registran)
+# ---------------------------------------------------------------------------
+
+# 1. Security headers en todas las respuestas
+app.add_middleware(SecurityHeadersMiddleware)
+
+# 2. Access log: user_id, endpoint, response_time_ms
+app.add_middleware(AccessLogMiddleware)
+
+# 3. CORS — restringido a orígenes conocidos
+# En producción: configurar via env var ALLOWED_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -82,11 +104,12 @@ app.add_middleware(
         "http://localhost:5173",   # Vite dev server
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
-        # Production origins configured via environment variable in Phase 2
+        # Production origins via ALLOWED_ORIGINS env var in Phase 3
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    expose_headers=["X-Response-Time-Ms", "X-Process-Time-Ms"],
 )
 
 
@@ -195,11 +218,14 @@ async def background_demo(background_tasks: BackgroundTasks) -> dict:
 # ROUTER REGISTRATION
 # ---------------------------------------------------------------------------
 
+app.include_router(auth_router.router)
 app.include_router(documents.router)
 app.include_router(transactions.router)
+app.include_router(centinela.router)
 app.include_router(cpa_dashboard.router)
 app.include_router(reports.router)
 app.include_router(normative.router)
+app.include_router(admin.router)
 
 
 # ---------------------------------------------------------------------------

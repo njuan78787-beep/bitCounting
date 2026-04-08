@@ -27,8 +27,31 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.auth import Role, create_test_token
 
 client = TestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# Auth helpers — tokens de prueba para distintos roles
+# ---------------------------------------------------------------------------
+
+def _client_headers(client_id: str = "client-demo-001") -> dict:
+    """Headers con Bearer token de rol CLIENT."""
+    token = create_test_token(role=Role.CLIENT, client_id=client_id)
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _cpa_headers(client_id: str = "client-demo-001") -> dict:
+    """Headers con Bearer token de rol CPA_PARTNER."""
+    token = create_test_token(role=Role.CPA_PARTNER, client_id=client_id)
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _admin_headers() -> dict:
+    """Headers con Bearer token de rol EXIMIA_ADMIN."""
+    token = create_test_token(role=Role.EXIMIA_ADMIN, client_id=None)
+    return {"Authorization": f"Bearer {token}"}
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +145,7 @@ def test_process_text_stores_document_for_status_retrieval():
 
 def test_get_pauses_returns_200_list():
     """GET /api/v1/cpa/pauses must return 200 with a list."""
-    response = client.get("/api/v1/cpa/pauses")
+    response = client.get("/api/v1/cpa/pauses", headers=_cpa_headers())
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)
@@ -130,7 +153,7 @@ def test_get_pauses_returns_200_list():
 
 def test_get_pauses_items_have_required_fields():
     """Each pause in the list must have the required fields."""
-    response = client.get("/api/v1/cpa/pauses")
+    response = client.get("/api/v1/cpa/pauses", headers=_cpa_headers())
     assert response.status_code == 200
     pauses = response.json()
 
@@ -144,7 +167,10 @@ def test_get_pauses_items_have_required_fields():
 
 def test_get_pauses_with_cpa_license_filter():
     """Pauses can be filtered by CPA license."""
-    response = client.get("/api/v1/cpa/pauses?cpa_license=CPA-NONEXISTENT-999")
+    response = client.get(
+        "/api/v1/cpa/pauses?cpa_license=CPA-NONEXISTENT-999",
+        headers=_cpa_headers(),
+    )
     assert response.status_code == 200
     # Should return empty list since no pauses are assigned to this license
     data = response.json()
@@ -169,7 +195,7 @@ def test_approve_low_consequence_item_immediately():
         "action": "approved",
         "notes": "Reviewed and approved — below capitalization threshold.",
     }
-    response = client.post(f"/api/v1/cpa/approve/{item_id}", json=payload)
+    response = client.post(f"/api/v1/cpa/approve/{item_id}", json=payload, headers=_cpa_headers())
     assert response.status_code == 200
 
     data = response.json()
@@ -198,7 +224,11 @@ def test_approve_nonexistent_item_returns_404():
         "action": "approved",
         "notes": "Test",
     }
-    response = client.post("/api/v1/cpa/approve/nonexistent-item-xyz", json=payload)
+    response = client.post(
+        "/api/v1/cpa/approve/nonexistent-item-xyz",
+        json=payload,
+        headers=_cpa_headers(),
+    )
     assert response.status_code == 404
 
 
@@ -220,7 +250,7 @@ def test_approve_high_consequence_returns_question_first():
         "action": "approved",
         "notes": "About to approve after reviewing",
     }
-    response = client.post(f"/api/v1/cpa/approve/{item_id}", json=payload)
+    response = client.post(f"/api/v1/cpa/approve/{item_id}", json=payload, headers=_cpa_headers())
     assert response.status_code == 200
 
     data = response.json()
@@ -244,7 +274,7 @@ def test_approve_high_consequence_with_wrong_answer_returns_400():
         "notes": "Test wrong answer",
         "challenge_answer": "THIS_IS_DEFINITELY_WRONG_ANSWER_XYZ",
     }
-    response = client.post(f"/api/v1/cpa/approve/{item_id}", json=payload)
+    response = client.post(f"/api/v1/cpa/approve/{item_id}", json=payload, headers=_cpa_headers())
     assert response.status_code == 400
 
 
@@ -254,7 +284,7 @@ def test_approve_high_consequence_with_wrong_answer_returns_400():
 
 def test_cpa_metrics_returns_200():
     """GET /api/v1/cpa/metrics must return 200 with required fields."""
-    response = client.get("/api/v1/cpa/metrics?cpa_license=CPA-PR-12345")
+    response = client.get("/api/v1/cpa/metrics?cpa_license=CPA-PR-12345", headers=_cpa_headers())
     assert response.status_code == 200
 
     data = response.json()
@@ -297,11 +327,11 @@ def test_cpa_metrics_tracks_low_approval():
         "action": "approved",
         "notes": "Test approval for metrics",
     }
-    resp = client.post(f"/api/v1/cpa/approve/{fresh_id}", json=payload)
+    resp = client.post(f"/api/v1/cpa/approve/{fresh_id}", json=payload, headers=_cpa_headers())
     assert resp.status_code == 200
 
     # Check metrics
-    metrics_resp = client.get(f"/api/v1/cpa/metrics?cpa_license={cpa_license}")
+    metrics_resp = client.get(f"/api/v1/cpa/metrics?cpa_license={cpa_license}", headers=_cpa_headers())
     assert metrics_resp.status_code == 200
     # No suspicious flags expected for a LOW item
     metrics = metrics_resp.json()
@@ -341,7 +371,7 @@ def test_fast_high_approval_is_tracked_in_metrics():
         "action": "approved",
         "notes": "",
     }
-    resp1 = client.post(f"/api/v1/cpa/approve/{fresh_id}", json=payload1)
+    resp1 = client.post(f"/api/v1/cpa/approve/{fresh_id}", json=payload1, headers=_cpa_headers())
     assert resp1.status_code == 200
     question_data = resp1.json()
     assert question_data["action_required"] == "answer_question"
@@ -364,11 +394,11 @@ def test_fast_high_approval_is_tracked_in_metrics():
         "notes": "Approved instantly",
         "challenge_answer": correct_answer,
     }
-    resp2 = client.post(f"/api/v1/cpa/approve/{fresh_id}", json=payload2)
+    resp2 = client.post(f"/api/v1/cpa/approve/{fresh_id}", json=payload2, headers=_cpa_headers())
     assert resp2.status_code == 200
 
     # Check metrics — should have at least 1 suspicious approval
-    metrics_resp = client.get(f"/api/v1/cpa/metrics?cpa_license={cpa_license}")
+    metrics_resp = client.get(f"/api/v1/cpa/metrics?cpa_license={cpa_license}", headers=_cpa_headers())
     assert metrics_resp.status_code == 200
     metrics = metrics_resp.json()
     # Fast approval < 5s on HIGH item should be flagged
@@ -381,7 +411,7 @@ def test_fast_high_approval_is_tracked_in_metrics():
 
 def test_transactions_list_returns_200():
     """GET /api/v1/transactions must return paginated list."""
-    response = client.get("/api/v1/transactions")
+    response = client.get("/api/v1/transactions", headers=_admin_headers())
     assert response.status_code == 200
     data = response.json()
     assert "items" in data
@@ -391,7 +421,10 @@ def test_transactions_list_returns_200():
 
 def test_transactions_filtered_by_client():
     """Transactions can be filtered by client_id."""
-    response = client.get("/api/v1/transactions?client_id=client-demo-001")
+    response = client.get(
+        "/api/v1/transactions?client_id=client-demo-001",
+        headers=_admin_headers(),
+    )
     assert response.status_code == 200
     data = response.json()
     for item in data["items"]:
@@ -401,7 +434,8 @@ def test_transactions_filtered_by_client():
 def test_balance_sheet_returns_200():
     """GET /api/v1/reports/balance-sheet must return 200."""
     response = client.get(
-        "/api/v1/reports/balance-sheet?client_id=client-demo-001&as_of_date=2026-03-31"
+        "/api/v1/reports/balance-sheet?client_id=client-demo-001&as_of_date=2026-03-31",
+        headers=_client_headers(),
     )
     assert response.status_code == 200
     data = response.json()
@@ -418,7 +452,10 @@ def test_balance_sheet_returns_200():
 
 def test_ivu_summary_returns_200():
     """GET /api/v1/reports/ivu-summary must return IVU data for SC 2915."""
-    response = client.get("/api/v1/reports/ivu-summary?client_id=client-demo-001&period=2026-03")
+    response = client.get(
+        "/api/v1/reports/ivu-summary?client_id=client-demo-001&period=2026-03",
+        headers=_client_headers(),
+    )
     assert response.status_code == 200
     data = response.json()
     assert "ivu_collected" in data
