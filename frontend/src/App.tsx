@@ -21,14 +21,29 @@ import { CpaMetrics }         from './views/cpa/CpaMetrics'
 // Admin views
 import { NormativeUpdatesView } from './views/admin/NormativeUpdates'
 
-// ─── Guard: redirect to login if not authenticated ───────────────────────────
+// Demo mode banner
+declare const __DEMO_MODE__: boolean
+
+function DemoBanner() {
+  if (!__DEMO_MODE__) return null
+  return (
+    <div className="w-full bg-[var(--color-accent)] text-white text-xs font-medium py-1.5 px-4 flex items-center justify-center gap-3 z-50">
+      <span className="w-1.5 h-1.5 rounded-full bg-white/70 animate-pulse-dot flex-shrink-0" />
+      <span>
+        MODO DEMO — Login: <span className="font-mono bg-white/20 px-1 rounded">demo</span> / cualquier contraseña · MFA: cualquier 6 dígitos · CPA: usuario <span className="font-mono bg-white/20 px-1 rounded">cpa.demo</span>
+      </span>
+    </div>
+  )
+}
+
+// ─── Guards ───────────────────────────────────────────────────────────────────
+
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useUser()
   if (!user) return <Navigate to="/login" replace />
   return <>{children}</>
 }
 
-// ─── Guard: CPA or Admin only ─────────────────────────────────────────────────
 function RequireCpa({ children }: { children: React.ReactNode }) {
   const user  = useUser()
   const isCpa = useIsCpa()
@@ -37,7 +52,6 @@ function RequireCpa({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-// ─── Guard: Admin only ────────────────────────────────────────────────────────
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const user    = useUser()
   const isAdmin = useIsAdmin()
@@ -46,7 +60,6 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-// ─── Smart redirect from "/" based on role ───────────────────────────────────
 function RootRedirect() {
   const user    = useUser()
   const isCpa   = useIsCpa()
@@ -56,7 +69,8 @@ function RootRedirect() {
   return <Navigate to="/dashboard" replace />
 }
 
-// ─── Thin wrappers to embed standalone views inside Layout ───────────────────
+// ─── Page wrappers ────────────────────────────────────────────────────────────
+
 function ClientUploadPage() {
   return (
     <div className="p-4 sm:p-6 max-w-xl">
@@ -117,10 +131,10 @@ function AdminHomePage() {
       <p className="text-sm text-[var(--color-text-4)] mb-6">Panel exclusivo EXIMIA_ADMIN</p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {[
-          { label: 'Actualizaciones Normativas', desc: 'Motor ACTUALIZADOR V2', href: '/admin/normative', icon: '§' },
-          { label: 'Cola de Revisión CPA',       desc: 'Supervisión de decisiones',  href: '/cpa/queue',      icon: '▤' },
-          { label: 'Pausas CENTINELA',            desc: 'Gestión de interrupciones',  href: '/cpa/pauses',     icon: '⏸' },
-          { label: 'Métricas del Sistema',        desc: 'KPIs y cumplimiento SLA',     href: '/cpa/metrics',    icon: '◐' },
+          { label: 'Actualizaciones Normativas', desc: 'Motor ACTUALIZADOR V2',     href: '/admin/normative', icon: '§' },
+          { label: 'Cola de Revisión CPA',       desc: 'Supervisión de decisiones', href: '/cpa/queue',       icon: '▤' },
+          { label: 'Pausas CENTINELA',           desc: 'Gestión de interrupciones', href: '/cpa/pauses',      icon: '⏸' },
+          { label: 'Métricas del Sistema',       desc: 'KPIs y cumplimiento SLA',   href: '/cpa/metrics',     icon: '◐' },
         ].map((item) => (
           <a
             key={item.href}
@@ -145,54 +159,59 @@ function AdminHomePage() {
 
 export default function App() {
   return (
-    <Routes>
-      {/* Public */}
-      <Route path="/login" element={<LoginView />} />
+    <div className="flex flex-col h-full">
+      <DemoBanner />
+      <div className="flex-1 overflow-hidden">
+        <Routes>
+          {/* Public */}
+          <Route path="/login" element={<LoginView />} />
 
-      {/* Root redirect */}
-      <Route path="/" element={<RootRedirect />} />
+          {/* Root redirect */}
+          <Route path="/" element={<RootRedirect />} />
 
-      {/* Client routes */}
-      <Route path="/dashboard" element={
-        <RequireAuth><Layout><ClientDashboard /></Layout></RequireAuth>
-      } />
-      <Route path="/upload" element={
-        <RequireAuth><Layout><ClientUploadPage /></Layout></RequireAuth>
-      } />
-      <Route path="/transactions" element={
-        <RequireAuth><Layout><div className="p-4 sm:p-6"><TransactionList /></div></Layout></RequireAuth>
-      } />
-      <Route path="/reports" element={
-        <RequireAuth><Layout><ClientReportsPage /></Layout></RequireAuth>
-      } />
+          {/* Client routes */}
+          <Route path="/dashboard" element={
+            <RequireAuth><Layout><ClientDashboard /></Layout></RequireAuth>
+          } />
+          <Route path="/upload" element={
+            <RequireAuth><Layout><ClientUploadPage /></Layout></RequireAuth>
+          } />
+          <Route path="/transactions" element={
+            <RequireAuth><Layout><div className="p-4 sm:p-6"><TransactionList /></div></Layout></RequireAuth>
+          } />
+          <Route path="/reports" element={
+            <RequireAuth><Layout><ClientReportsPage /></Layout></RequireAuth>
+          } />
 
-      {/* CPA routes */}
-      <Route path="/cpa" element={
-        <RequireCpa><Layout><CpaDashboard /></Layout></RequireCpa>
-      } />
-      <Route path="/cpa/queue" element={
-        <RequireCpa><Layout><CpaQueuePage /></Layout></RequireCpa>
-      } />
-      <Route path="/cpa/pauses" element={
-        <RequireCpa><Layout><CpaPausesPage /></Layout></RequireCpa>
-      } />
-      <Route path="/cpa/instruct" element={
-        <RequireCpa><Layout><CpaInstructPage /></Layout></RequireCpa>
-      } />
-      <Route path="/cpa/metrics" element={
-        <RequireCpa><Layout><CpaMetricsPage /></Layout></RequireCpa>
-      } />
+          {/* CPA routes */}
+          <Route path="/cpa" element={
+            <RequireCpa><Layout><CpaDashboard /></Layout></RequireCpa>
+          } />
+          <Route path="/cpa/queue" element={
+            <RequireCpa><Layout><CpaQueuePage /></Layout></RequireCpa>
+          } />
+          <Route path="/cpa/pauses" element={
+            <RequireCpa><Layout><CpaPausesPage /></Layout></RequireCpa>
+          } />
+          <Route path="/cpa/instruct" element={
+            <RequireCpa><Layout><CpaInstructPage /></Layout></RequireCpa>
+          } />
+          <Route path="/cpa/metrics" element={
+            <RequireCpa><Layout><CpaMetricsPage /></Layout></RequireCpa>
+          } />
 
-      {/* Admin routes */}
-      <Route path="/admin" element={
-        <RequireAdmin><Layout><AdminHomePage /></Layout></RequireAdmin>
-      } />
-      <Route path="/admin/normative" element={
-        <RequireAdmin><Layout><NormativeUpdatesView /></Layout></RequireAdmin>
-      } />
+          {/* Admin routes */}
+          <Route path="/admin" element={
+            <RequireAdmin><Layout><AdminHomePage /></Layout></RequireAdmin>
+          } />
+          <Route path="/admin/normative" element={
+            <RequireAdmin><Layout><NormativeUpdatesView /></Layout></RequireAdmin>
+          } />
 
-      {/* 404 fallback */}
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+          {/* 404 fallback */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </div>
+    </div>
   )
 }

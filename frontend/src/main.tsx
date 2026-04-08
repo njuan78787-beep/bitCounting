@@ -5,11 +5,18 @@ import { BrowserRouter } from 'react-router-dom'
 import './index.css'
 import App from './App.tsx'
 
+// Boot demo mock before any network call if demo mode is active
+declare const __DEMO_MODE__: boolean
+if (__DEMO_MODE__) {
+  const { installMock } = await import('./api/mock.ts')
+  installMock()
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry:            1,
-      staleTime:        30_000,
+      retry:                1,
+      staleTime:            30_000,
       refetchOnWindowFocus: true,
     },
   },

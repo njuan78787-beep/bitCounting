@@ -6,7 +6,8 @@
 
 import type { ApiError } from '../types/api'
 
-const BASE_URL = '/api/v1'
+// Base URL: use VITE_API_BASE_URL if set, otherwise fallback to /api/v1 (proxied in dev)
+const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api/v1'
 
 // Token storage (memory-only for access token, sessionStorage for refresh)
 let _accessToken: string | null = null
