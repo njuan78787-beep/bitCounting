@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -55,11 +56,35 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Startup and shutdown logic for the Bit-Counting API."""
+    """
+    Startup: initialize DB (create tables + seed demo data) and Redis.
+    Shutdown: close all connections gracefully.
+    """
     logger.info("Bit-Counting API starting — Puerto Rico autonomous accounting system")
     logger.info("Agent pipeline: INTAKE → CENTINELA → CLASIFICADOR → AUDITOR → ORQUESTADOR")
+
+    # 1. Redis (non-blocking — falls back to in-memory if unavailable)
+    from .database import init_redis
+    await init_redis()
+
+    # 2. Database: create tables
+    from .database import create_tables, _session_factory
+    await create_tables()
+
+    # 3. Seed demo data (idempotent — no-ops if rows already exist)
+    if _session_factory is not None:
+        from .db.seed import run_seed
+        async with _session_factory() as db:
+            try:
+                await run_seed(db)
+            except Exception as exc:
+                logger.warning("Seed failed (DB may not be ready yet): %s", exc)
+
     yield
+
     logger.info("Bit-Counting API shutting down")
+    from .database import close_connections
+    await close_connections()
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +110,23 @@ app = FastAPI(
 # CORS MIDDLEWARE — allows React dashboard to communicate with the API
 # ---------------------------------------------------------------------------
 
+# Parse ALLOWED_ORIGINS from env var (comma-separated list of origins).
+# Defaults to local dev origins if not set.
+_DEFAULT_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+
+def _parse_allowed_origins() -> list[str]:
+    raw = os.environ.get("ALLOWED_ORIGINS", "")
+    if not raw:
+        return _DEFAULT_ORIGINS
+    extras = [o.strip() for o in raw.split(",") if o.strip()]
+    return _DEFAULT_ORIGINS + extras
+
+
 # ---------------------------------------------------------------------------
 # SECURITY MIDDLEWARES (se aplican en orden inverso al que se registran)
 # ---------------------------------------------------------------------------
@@ -95,17 +137,10 @@ app.add_middleware(SecurityHeadersMiddleware)
 # 2. Access log: user_id, endpoint, response_time_ms
 app.add_middleware(AccessLogMiddleware)
 
-# 3. CORS — restringido a orígenes conocidos
-# En producción: configurar via env var ALLOWED_ORIGINS
+# 3. CORS — default to localhost dev; production adds origins via ALLOWED_ORIGINS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",   # React dev server
-        "http://localhost:5173",   # Vite dev server
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        # Production origins via ALLOWED_ORIGINS env var in Phase 3
-    ],
+    allow_origins=_parse_allowed_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],

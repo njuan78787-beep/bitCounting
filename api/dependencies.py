@@ -298,6 +298,7 @@ def rate_limit(endpoint_key: str = "default"):
     Fábrica de dependencias para rate limiting.
 
     Identifica al usuario por su IP cuando no hay JWT, o por user_id si hay JWT.
+    Usa Redis sliding-window cuando está disponible; cae a in-memory si no.
 
     Uso:
         @router.post("/upload")
@@ -307,7 +308,7 @@ def rate_limit(endpoint_key: str = "default"):
         ):
     """
     async def _check_rate(request: Request) -> None:
-        # Usar user_id del JWT si disponible, si no usar IP
+        # Identificar usuario: JWT sub o IP como fallback
         auth_header = request.headers.get("Authorization", "")
         user_key = request.client.host if request.client else "unknown"
         if auth_header.startswith("Bearer "):
@@ -316,6 +317,55 @@ def rate_limit(endpoint_key: str = "default"):
                 user_key = payload.get("sub", user_key)
             except Exception:
                 pass  # Token inválido → usar IP
-        _rate_limiter.check(user_key, endpoint_key)
+
+        # Intentar Redis primero
+        try:
+            from .database import get_redis_client
+            redis = await get_redis_client()
+        except Exception:
+            redis = None
+
+        if redis is not None:
+            await _redis_rate_check(redis, user_key, endpoint_key)
+        else:
+            _rate_limiter.check(user_key, endpoint_key)
 
     return _check_rate
+
+
+async def _redis_rate_check(redis, user_key: str, endpoint_key: str) -> None:
+    """
+    Sliding-window rate limit using Redis sorted sets.
+    Raises 429 if the limit is exceeded.
+    """
+    import time as _time
+
+    max_req, window_sec = _rate_limiter._LIMITS.get(
+        endpoint_key, _rate_limiter._LIMITS["default"]
+    )
+    key = f"rl:{endpoint_key}:{user_key}"
+    now_ms = int(_time.time() * 1000)
+    cutoff_ms = now_ms - window_sec * 1000
+
+    try:
+        pipe = redis.pipeline()
+        pipe.zremrangebyscore(key, 0, cutoff_ms)
+        pipe.zadd(key, {str(now_ms): now_ms})
+        pipe.zcard(key)
+        pipe.expire(key, window_sec + 1)
+        results = await pipe.execute()
+        count = results[2]
+    except Exception as exc:
+        logger.warning("Redis rate-limit check failed (%s) — allowing request", exc)
+        return
+
+    if count > max_req:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Rate limit excedido para {endpoint_key}: "
+                f"máximo {max_req} requests por {window_sec}s. "
+                "Intente nuevamente más tarde."
+            ),
+            headers={"Retry-After": str(window_sec)},
+        )

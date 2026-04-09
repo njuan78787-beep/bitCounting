@@ -457,17 +457,97 @@ def create_test_token(
 # ---------------------------------------------------------------------------
 
 def _seed_demo_users() -> None:
-    """Crea usuarios demo si la base de datos está vacía."""
+    """Crea usuarios demo si la base de datos en-memoria está vacía."""
     if _USERS_DB:
         return
 
-    create_user("admin@eximia.pr", "Admin2026!Secure", Role.EXIMIA_ADMIN)
-    create_user("cpa_senior@eximia.pr", "CPA2026!Senior", Role.CPA_SENIOR)
-    create_user("cpa_partner@eximia.pr", "CPA2026!Partner", Role.CPA_PARTNER,
+    create_user("admin@eximia.pr",       "Admin2026!Secure",  Role.EXIMIA_ADMIN)
+    create_user("cpa_senior@eximia.pr",  "CPA2026!Senior",    Role.CPA_SENIOR)
+    create_user("cpa_partner@eximia.pr", "CPA2026!Partner",   Role.CPA_PARTNER,
                 client_id="client-demo-001")
-    create_user("cliente@empresa.pr", "Client2026!Demo", Role.CLIENT,
+    create_user("cliente@empresa.pr",    "Client2026!Demo",   Role.CLIENT,
                 client_id="client-demo-001")
+    create_user("demo",                  "demo",              Role.CLIENT,
+                client_id="client-demo-001")
+    create_user("cpa.demo",              "demo",              Role.CPA_PARTNER)
     logger.info("Usuarios demo creados (Phase 1 en-memoria)")
 
 
 _seed_demo_users()
+
+
+# ---------------------------------------------------------------------------
+# Async DB-backed auth — used by routes when DATABASE_URL is set
+# ---------------------------------------------------------------------------
+
+async def get_user_db(db, username: str) -> Optional[UserRecord]:
+    """
+    Look up a user by username in the PostgreSQL database.
+
+    Falls back to the in-memory store if `db` is None (test / no-DB mode).
+    """
+    if db is None:
+        return get_user(username)
+
+    from sqlalchemy import select
+    from .db.models import AppUser
+
+    result = await db.execute(select(AppUser).where(AppUser.username == username))
+    row: Optional[AppUser] = result.scalar_one_or_none()
+    if row is None:
+        return None
+
+    return UserRecord(
+        user_id=row.id,
+        username=row.username,
+        password_hash=row.password_hash,
+        role=Role(row.role),
+        client_id=row.client_id,
+        totp_secret=row.totp_secret,
+        mfa_enabled=row.mfa_enabled,
+        is_active=row.is_active,
+    )
+
+
+async def authenticate_user_db(db, username: str, password: str) -> Optional[UserRecord]:
+    """
+    Authenticate a user against the PostgreSQL database.
+
+    Uses timing-safe comparison to resist enumeration attacks.
+    Falls back to in-memory store if `db` is None.
+    """
+    user = await get_user_db(db, username)
+    if user is None or not user.is_active:
+        _hash_password(password)   # consume equal time even on miss
+        return None
+    if hmac.compare_digest(user.password_hash, _hash_password(password)):
+        return user
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Async Redis-backed token blacklist
+# ---------------------------------------------------------------------------
+
+async def revoke_refresh_token_async(redis, jti: str) -> None:
+    """
+    Revoke a refresh token.  Stores in Redis (with TTL) and in-memory fallback.
+    """
+    _REFRESH_TOKEN_BLACKLIST.add(jti)
+    if redis is not None:
+        try:
+            await redis.setex(f"blacklist:{jti}", REFRESH_TOKEN_EXPIRE_SECONDS, "1")
+        except Exception as exc:
+            logger.warning("Redis revoke failed (%s) — in-memory blacklist used", exc)
+
+
+async def is_refresh_token_revoked_async(redis, jti: str) -> bool:
+    """
+    Check if a refresh token has been revoked.  Checks Redis first, then in-memory.
+    """
+    if redis is not None:
+        try:
+            return bool(await redis.exists(f"blacklist:{jti}"))
+        except Exception as exc:
+            logger.warning("Redis check failed (%s) — falling back to in-memory", exc)
+    return jti in _REFRESH_TOKEN_BLACKLIST
