@@ -39,9 +39,5 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
-    define: {
-      // Expose env vars to the app
-      __DEMO_MODE__: JSON.stringify(env.VITE_DEMO_MODE === 'true'),
-    },
   }
 })

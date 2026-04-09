@@ -21,11 +21,8 @@ import { CpaMetrics }         from './views/cpa/CpaMetrics'
 // Admin views
 import { NormativeUpdatesView } from './views/admin/NormativeUpdates'
 
-// Demo mode banner
-declare const __DEMO_MODE__: boolean
-
 function DemoBanner() {
-  if (!__DEMO_MODE__) return null
+  if (import.meta.env.VITE_DEMO_MODE !== 'true') return null
   return (
     <div className="w-full bg-[var(--color-accent)] text-white text-xs font-medium py-1.5 px-4 flex items-center justify-center gap-3 z-50">
       <span className="w-1.5 h-1.5 rounded-full bg-white/70 animate-pulse-dot flex-shrink-0" />

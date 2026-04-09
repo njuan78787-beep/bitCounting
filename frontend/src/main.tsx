@@ -5,9 +5,10 @@ import { BrowserRouter } from 'react-router-dom'
 import './index.css'
 import App from './App.tsx'
 
-// Boot demo mock before any network call if demo mode is active
-declare const __DEMO_MODE__: boolean
-if (__DEMO_MODE__) {
+// Boot demo mock before any network call if demo mode is active.
+// import.meta.env.VITE_DEMO_MODE is embedded by Vite from shell env vars
+// (set via vercel.json "env" or local .env.local) — more reliable than __define__.
+if (import.meta.env.VITE_DEMO_MODE === 'true') {
   const { installMock } = await import('./api/mock.ts')
   installMock()
 }
