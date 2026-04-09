@@ -22,8 +22,5 @@
         { "key": "Referrer-Policy",         "value": "strict-origin-when-cross-origin" }
       ]
     }
-  ],
-  "env": {
-    "VITE_DEMO_MODE": "true"
-  }
+  ]
 }
