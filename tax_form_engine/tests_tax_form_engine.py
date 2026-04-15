@@ -301,12 +301,19 @@ class TestF480_6A:
         assert len(recipient_lines) == 2
 
     def test_no_full_ssn_in_recipients(self):
+        """Recipient lines must only show last 4 digits, never a 9-digit SSN/EIN."""
         from tax_form_engine.forms.f480_6ab import generate_480_6a
         req = _make_request([FormType.F480_6A], _FISCAL_480_6A)
         form = generate_480_6a(req, _FISCAL_480_6A)
         for line in form.lines:
-            if line.text_value:
-                assert len(line.text_value.replace("***", "").strip()) <= 4 or "ID:" not in line.text_value
+            if line.text_value and "ID:" in line.text_value:
+                # Format is "ID: ***XXXX" — extract digits after "***"
+                parts = line.text_value.split("***")
+                if len(parts) > 1:
+                    id_digits = parts[-1].strip()
+                    assert len(id_digits) <= 4, (
+                        f"Recipient line {line.line_number} exposes more than 4 ID digits: {id_digits!r}"
+                    )
 
 
 # ===========================================================================
@@ -314,7 +321,7 @@ class TestF480_6A:
 # ===========================================================================
 
 class TestTaxFormEngineGenerate:
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_generate_sc2915_no_db(self):
         from tax_form_engine.engine import TaxFormEngine
         engine = TaxFormEngine(db=None)
@@ -324,7 +331,7 @@ class TestTaxFormEngineGenerate:
         assert forms[0].form_type == FormType.SC2915
         assert forms[0].form_status == FormStatus.PENDING_CPA_REVIEW
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_generate_multiple_forms(self):
         from tax_form_engine.engine import TaxFormEngine
         engine = TaxFormEngine(db=None)
@@ -346,7 +353,7 @@ class TestTaxFormEngineGenerate:
         assert FormType.F480_20 in types
         assert FormType.F480_6A in types
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_quarterly_form_skipped_for_annual_period(self):
         """941-PR requires QUARTERLY period — skipped when request is ANNUAL."""
         from tax_form_engine.engine import TaxFormEngine
@@ -361,7 +368,7 @@ class TestTaxFormEngineGenerate:
 # ===========================================================================
 
 class TestTaxFormEngineReview:
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_review_advances_status(self):
         from tax_form_engine.engine import TaxFormEngine, _row_to_tax_form
         engine = TaxFormEngine(db=None)
@@ -392,7 +399,7 @@ class TestTaxFormEngineReview:
         assert reviewed.form_status == FormStatus.PENDING_CPA_SIGNATURE
         assert reviewed.assigned_cpa_license == _CPA_LICENSE
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_review_wrong_status_raises(self):
         from tax_form_engine.engine import TaxFormEngine
 
@@ -415,7 +422,7 @@ class TestTaxFormEngineReview:
 # ===========================================================================
 
 class TestTaxFormEngineSign:
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_sign_produces_signature_hash(self):
         from tax_form_engine.engine import TaxFormEngine
 
@@ -442,7 +449,7 @@ class TestTaxFormEngineSign:
         assert signed.signature is not None
         assert len(signed.signature.signature_hash) == 64   # SHA-256 hex
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_sign_wrong_status_raises(self):
         from tax_form_engine.engine import TaxFormEngine
 
@@ -461,7 +468,7 @@ class TestTaxFormEngineSign:
                 declaration_accepted=True,
             ))
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_sign_wrong_cpa_raises(self):
         from tax_form_engine.engine import TaxFormEngine
 

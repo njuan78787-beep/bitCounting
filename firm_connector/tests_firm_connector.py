@@ -37,6 +37,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
+# Helpers  (must be defined before module-level constants that use them)
+# ---------------------------------------------------------------------------
+
+def _fake_encrypted(plaintext: str) -> str:
+    """Produce a valid-looking base64 blob of ≥ 28 bytes for test fixtures."""
+    fake = os.urandom(12) + plaintext.encode().ljust(16, b"\x00") + os.urandom(16)
+    return base64.b64encode(fake).decode()
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -101,16 +111,6 @@ _SAMPLE_EMPLOYEES = [
 ]
 
 _SAMPLE_CLIENTS: List[Dict[str, Any]] = []   # parsed by parse_clients — raw dicts
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _fake_encrypted(plaintext: str) -> str:
-    """Produce a valid-looking base64 blob of ≥ 28 bytes for test fixtures."""
-    fake = os.urandom(12) + plaintext.encode().ljust(16, b"\x00") + os.urandom(16)
-    return base64.b64encode(fake).decode()
 
 
 def _make_firm_config(mode="DB_DIRECT"):
@@ -474,7 +474,7 @@ class TestAudit:
 # ===========================================================================
 
 class TestPermissions:
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_sync_requires_eximia_admin(self):
         from firm_connector.connector import FirmConnector
         from firm_connector.sync import PermissionDeniedError
@@ -487,7 +487,7 @@ class TestPermissions:
                 justification="Trying to sync",
             )
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_import_file_requires_eximia_admin(self):
         from firm_connector.connector import FirmConnector
         from firm_connector.sync import PermissionDeniedError
@@ -503,7 +503,7 @@ class TestPermissions:
                 justification="Trying to import",
             )
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_revoke_requires_eximia_admin(self):
         from firm_connector.connector import FirmConnector
         from firm_connector.sync import PermissionDeniedError
@@ -516,7 +516,7 @@ class TestPermissions:
                 justification="Trying to revoke",
             )
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_get_sync_status_allowed_for_cpa_senior(self):
         """CPA_SENIOR can READ sync status (CAPA 2 visibility)."""
         from firm_connector.connector import FirmConnector
@@ -529,7 +529,7 @@ class TestPermissions:
         )
         assert result is None   # no DB, no data — but no permission error
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_get_sync_status_denied_for_client(self):
         from firm_connector.connector import FirmConnector
         from firm_connector.sync import PermissionDeniedError
@@ -547,7 +547,7 @@ class TestPermissions:
 # ===========================================================================
 
 class TestRevocation:
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_revoked_firm_blocks_sync(self):
         from firm_connector.connector import FirmConnector
         from firm_connector.sync import PermissionDeniedError
@@ -578,7 +578,7 @@ class TestRevocation:
 # ===========================================================================
 
 class TestSyncFirmData:
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_sync_db_direct_success(self):
         """Full sync with mocked asyncpg pool returns SUCCESS."""
         from firm_connector.sync import sync_firm_data
@@ -617,7 +617,7 @@ class TestSyncFirmData:
         assert result.status.value in ("SUCCESS", "PARTIAL")
         assert result.firm_id == DEMO_FIRM_ID
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_sync_partial_when_missing_required_field(self):
         """Transactions with missing account_code get rejected → PARTIAL."""
         from firm_connector.sync import _process_extracted
@@ -646,7 +646,7 @@ class TestSyncFirmData:
 
         assert result.transactions_rejected >= 1
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_sync_failed_when_firm_unreachable(self):
         """FirmUnavailableError → FAILED status with error_message."""
         from firm_connector.sync import sync_firm_data
@@ -669,7 +669,7 @@ class TestSyncFirmData:
         assert result.status.value == "FAILED"
         assert result.error_message is not None
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_ssn_never_appears_in_logs(self, caplog):
         """SSN plaintext must never appear in log output at any level."""
         from firm_connector.sync import _process_extracted
@@ -699,7 +699,7 @@ class TestSyncFirmData:
                 f"SSN '{PLAINTEXT_SSN}' found in log record: {record.getMessage()}"
             )
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_already_processed_transactions_skipped(self):
         """Transactions with already_processed=True are counted as skipped, not imported."""
         from firm_connector.sync import _process_extracted
@@ -731,7 +731,7 @@ class TestSyncFirmData:
 # ===========================================================================
 
 class TestRestAPIMode:
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_token_cached_until_expiry(self):
         from firm_connector.modes.rest_api import RestAPIMode
         from firm_connector.models import OAuthConfig
@@ -754,7 +754,7 @@ class TestRestAPIMode:
         assert token2 == "tok-abc"
         assert mock_client.post.call_count == 1   # only fetched once
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_webhook_signature_invalid(self):
         from firm_connector.modes.rest_api import RestAPIMode
         from firm_connector.models import OAuthConfig
@@ -767,7 +767,7 @@ class TestRestAPIMode:
 
         assert valid is False
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_webhook_no_secret_returns_false(self):
         from firm_connector.modes.rest_api import RestAPIMode
         from firm_connector.models import OAuthConfig
@@ -785,11 +785,21 @@ class TestRestAPIMode:
 
 class TestDirectDBMode:
     def test_pool_size_capped_at_5(self):
-        from firm_connector.modes.db_direct import DirectDBMode, _MAX_POOL_SIZE
+        """Pydantic enforces max_pool_size ≤ 5 at model level; constant confirms the cap."""
+        from firm_connector.modes.db_direct import _MAX_POOL_SIZE
         from firm_connector.models import DBDirectConfig
+        import pydantic
 
-        config = DBDirectConfig(**{**DEMO_DB_CONFIG, "max_pool_size": 100})
-        assert min(config.max_pool_size, _MAX_POOL_SIZE) == 5
+        # Pydantic rejects values > 5 — this is the enforcement mechanism
+        with pytest.raises(pydantic.ValidationError):
+            DBDirectConfig(**{**DEMO_DB_CONFIG, "max_pool_size": 10})
+
+        # The _MAX_POOL_SIZE constant is the runtime fallback cap
+        assert _MAX_POOL_SIZE == 5
+
+        # A valid config at the boundary is accepted
+        cfg = DBDirectConfig(**{**DEMO_DB_CONFIG, "max_pool_size": 5})
+        assert cfg.max_pool_size == 5
 
 
 # ===========================================================================
