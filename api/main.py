@@ -43,6 +43,7 @@ from fastapi.responses import JSONResponse
 from .middleware import AccessLogMiddleware, SecurityHeadersMiddleware
 from .routes import documents, transactions, cpa_dashboard, reports, normative
 from .routes import auth_router, centinela, admin, firm_connector as firm_connector_router
+from .routes import tax_forms as tax_forms_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -263,6 +264,7 @@ app.include_router(reports.router)
 app.include_router(normative.router)
 app.include_router(admin.router)
 app.include_router(firm_connector_router.router)   # CAPA 1 — EXIMIA_ADMIN only
+app.include_router(tax_forms_router.router)        # CAPA 2 — CPA review + signature
 
 
 # ---------------------------------------------------------------------------
