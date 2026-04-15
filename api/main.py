@@ -20,6 +20,7 @@
 #   /api/v1/reports     — financial reports (balance sheet, P&L, cash flow, IVU)
 #   /api/v1/normative   — normative change monitoring
 #   /api/v1/admin       — administración (solo EXIMIA_ADMIN)
+#   /api/v1/firm-connector — FirmConnector: sync externo (CAPA 1 — EXIMIA_ADMIN)
 #
 # SEGURIDAD:
 #   - SecurityHeadersMiddleware: HSTS, CSP, X-Frame-Options, etc.
@@ -41,7 +42,7 @@ from fastapi.responses import JSONResponse
 
 from .middleware import AccessLogMiddleware, SecurityHeadersMiddleware
 from .routes import documents, transactions, cpa_dashboard, reports, normative
-from .routes import auth_router, centinela, admin
+from .routes import auth_router, centinela, admin, firm_connector as firm_connector_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -261,6 +262,7 @@ app.include_router(cpa_dashboard.router)
 app.include_router(reports.router)
 app.include_router(normative.router)
 app.include_router(admin.router)
+app.include_router(firm_connector_router.router)   # CAPA 1 — EXIMIA_ADMIN only
 
 
 # ---------------------------------------------------------------------------

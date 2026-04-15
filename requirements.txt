@@ -20,8 +20,12 @@ alembic==1.13.3                 # database migrations
 # ── Redis (async) ─────────────────────────────────────────────────────────────
 redis[hiredis]==5.1.1           # redis.asyncio + hiredis C parser
 
-# ── HTTP client (for normative source checks) ─────────────────────────────────
+# ── HTTP client (for normative source checks + REST_API mode) ─────────────────
 httpx==0.27.2
+
+# ── FirmConnector — encryption + file import ──────────────────────────────────
+cryptography>=43.0.0            # AES-256-GCM field-level encryption (SSN, EIN)
+openpyxl>=3.1.0                 # Excel import (.xlsx) for MANUAL_IMPORT mode
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest==8.3.2

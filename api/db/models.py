@@ -240,3 +240,160 @@ class AppApprovalSession(Base):
     item_id:      Mapped[str]  = mapped_column(String(36),  nullable=False, index=True)
     level:        Mapped[str]  = mapped_column(String(10),  nullable=False)
     started_at:   Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+
+
+# =============================================================================
+# FirmConnector tables  (all prefixed app_firm_*)
+# Owned entirely by the firm_connector module.
+# Write access: EXIMIA_ADMIN only (CAPA 1).
+# Read access:  EXIMIA_ADMIN + CPA_SENIOR/CPA_PARTNER for sync results (CAPA 2).
+# =============================================================================
+
+class AppFirmConfig(Base):
+    """
+    Master configuration record for a connected external accounting firm.
+    Sensitive credential fields (passwords, secrets) are stored encrypted.
+    """
+    __tablename__ = "app_firm_configs"
+
+    firm_id:    Mapped[str]  = mapped_column(String(36),  primary_key=True)
+    firm_name:  Mapped[str]  = mapped_column(String(255), nullable=False)
+    mode:       Mapped[str]  = mapped_column(String(20),  nullable=False)   # FirmConnectionMode value
+    is_active:  Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str]  = mapped_column(String(36),  nullable=False)   # EXIMIA_ADMIN user_id
+    # Serialized JSON of DBDirectConfig or OAuthConfig (no plaintext secrets)
+    config_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at:  Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=_now, nullable=True)
+
+
+class AppSyncLog(Base):
+    """
+    Append-only log of every sync_firm_data() execution.
+    Contains counts only — no field values, no SSN/EIN.
+    """
+    __tablename__ = "app_sync_logs"
+
+    sync_id:               Mapped[str]  = mapped_column(String(36), primary_key=True)
+    firm_id:               Mapped[str]  = mapped_column(String(36), nullable=False, index=True)
+    status:                Mapped[str]  = mapped_column(String(20), nullable=False)
+    mode_used:             Mapped[str]  = mapped_column(String(20), nullable=False)
+    started_at:            Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    completed_at:          Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    clients_imported:      Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    clients_rejected:      Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    transactions_imported: Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    transactions_rejected: Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    transactions_skipped:  Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    employees_imported:    Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    employees_rejected:    Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    rejected_records:      Mapped[Optional[List[Any]]] = mapped_column(JSONB, nullable=True)
+    error_message:         Mapped[Optional[str]]  = mapped_column(Text, nullable=True)
+    is_cached_data:        Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class AppAccountMapping(Base):
+    """
+    Maps a firm's account code to Bit-Counting's internal chart of accounts.
+    Must be CPA-confirmed before the mapped code is used in processing.
+    """
+    __tablename__ = "app_account_mappings"
+
+    id:                    Mapped[str]  = mapped_column(String(36), primary_key=True, default=_uuid)
+    firm_id:               Mapped[str]  = mapped_column(String(36), nullable=False, index=True)
+    firm_account_code:     Mapped[str]  = mapped_column(String(100), nullable=False)
+    internal_account_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    status:                Mapped[str]  = mapped_column(String(20), nullable=False, default="UNMAPPED")
+    cpa_confirmed:         Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at:            Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at:            Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=_now, nullable=True)
+
+
+class AppFirmAuditLog(Base):
+    """
+    Append-only audit trail for all FirmConnector access.
+    No sensitive field values — actor, action, outcome, and count only.
+    """
+    __tablename__ = "app_firm_audit_log"
+
+    entry_id:         Mapped[str]  = mapped_column(String(36), primary_key=True)
+    actor_id:         Mapped[str]  = mapped_column(String(36),  nullable=False, index=True)
+    actor_role:       Mapped[str]  = mapped_column(String(20),  nullable=False)
+    firm_id:          Mapped[str]  = mapped_column(String(36),  nullable=False, index=True)
+    action:           Mapped[str]  = mapped_column(String(50),  nullable=False)
+    justification:    Mapped[str]  = mapped_column(Text,        nullable=False)
+    outcome:          Mapped[str]  = mapped_column(String(20),  nullable=False, default="SUCCESS")
+    records_affected: Mapped[int]  = mapped_column(Integer,     default=0, nullable=False)
+    timestamp:        Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    detail:           Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class AppFirmClient(Base):
+    """
+    Client records imported from external accounting firms.
+    ssn_or_ein_federal_encrypted stores AES-256-GCM ciphertext — never plaintext.
+    """
+    __tablename__ = "app_firm_clients"
+
+    id:                          Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    firm_id:                     Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    firm_client_id:              Mapped[str] = mapped_column(String(100), nullable=False)
+    business_name:               Mapped[str] = mapped_column(String(500), nullable=False)
+    ein_pr:                      Mapped[str] = mapped_column(String(20),  nullable=False)
+    ssn_or_ein_federal_encrypted: Mapped[str] = mapped_column(Text, nullable=False)  # AES-256-GCM
+    business_type:               Mapped[str] = mapped_column(String(20),  nullable=False)
+    municipality_pr:             Mapped[str] = mapped_column(String(100), nullable=False)
+    tax_year:                    Mapped[int] = mapped_column(Integer,     nullable=False)
+    accounting_method:           Mapped[str] = mapped_column(String(10),  nullable=False)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at:  Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=_now, nullable=True)
+
+
+class AppFirmTransaction(Base):
+    """
+    Transaction records imported from external accounting firms.
+    Non-sensitive — no field-level encryption required.
+    """
+    __tablename__ = "app_firm_transactions"
+
+    id:                   Mapped[str]  = mapped_column(String(36), primary_key=True, default=_uuid)
+    transaction_id:       Mapped[str]  = mapped_column(String(100), nullable=False, unique=True, index=True)
+    firm_id:              Mapped[str]  = mapped_column(String(36),  nullable=False, index=True)
+    firm_client_id:       Mapped[str]  = mapped_column(String(100), nullable=False, index=True)
+    date:                 Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    description:          Mapped[str]  = mapped_column(Text, nullable=False)
+    amount:               Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    transaction_type:     Mapped[str]  = mapped_column(String(20), nullable=False)
+    firm_account_code:    Mapped[str]  = mapped_column(String(100), nullable=False)
+    internal_account_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    vendor_or_client:     Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    invoice_number:       Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    ivu_collected:        Mapped[Optional[Decimal]] = mapped_column(Numeric(15, 2), nullable=True)
+    ivu_paid:             Mapped[Optional[Decimal]] = mapped_column(Numeric(15, 2), nullable=True)
+    is_payroll:           Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+
+
+class AppFirmEmployee(Base):
+    """
+    Employee payroll records imported from external accounting firms.
+    name_encrypted and ssn_encrypted store AES-256-GCM ciphertext — never plaintext.
+    """
+    __tablename__ = "app_firm_employees"
+
+    id:                    Mapped[str]  = mapped_column(String(36), primary_key=True, default=_uuid)
+    firm_id:               Mapped[str]  = mapped_column(String(36),  nullable=False, index=True)
+    employee_id:           Mapped[str]  = mapped_column(String(100), nullable=False)
+    firm_client_id:        Mapped[str]  = mapped_column(String(100), nullable=False, index=True)
+    name_encrypted:        Mapped[str]  = mapped_column(Text, nullable=False)   # AES-256-GCM
+    ssn_encrypted:         Mapped[str]  = mapped_column(Text, nullable=False)   # AES-256-GCM — NEVER plaintext
+    hire_date:             Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    termination_date:      Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    pay_type:              Mapped[str]  = mapped_column(String(10),  nullable=False)
+    pay_rate:              Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    filing_status_federal: Mapped[str]  = mapped_column(String(20),  nullable=False)
+    allowances_federal:    Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    filing_status_pr:      Mapped[str]  = mapped_column(String(20),  nullable=False)
+    allowances_pr:         Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at:  Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=_now, nullable=True)
