@@ -437,3 +437,154 @@ class AppTaxForm(Base):
     submission_ref:        Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     amends_form_id:        Mapped[Optional[str]] = mapped_column(String(36),  nullable=True)
     updated_at:            Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=_now, nullable=True)
+
+
+# =============================================================================
+# Admin Panel tables  (app_cpa_*, app_fiscal_*, app_learning_*, app_subscriptions, app_system_*)
+# EXIMIA_ADMIN manages these; CPAs read their own slice only.
+# =============================================================================
+
+class AppCpaPartner(Base):
+    """
+    CPA Partner registry managed by EXIMIA_ADMIN.
+    Tracks license verification, client assignments, and suspension history.
+    """
+    __tablename__ = "app_cpa_partners"
+
+    cpa_id:              Mapped[str]  = mapped_column(String(36),  primary_key=True, default=_uuid)
+    cpa_license:         Mapped[str]  = mapped_column(String(100), unique=True, nullable=False, index=True)
+    full_name:           Mapped[str]  = mapped_column(String(255), nullable=False)
+    email:               Mapped[str]  = mapped_column(String(255), nullable=False)
+    phone:               Mapped[Optional[str]] = mapped_column(String(30),  nullable=True)
+    status:              Mapped[str]  = mapped_column(String(30),  nullable=False, default="PENDING_VERIFICATION", index=True)
+    license_verified:    Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    license_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    license_verified_by: Mapped[Optional[str]] = mapped_column(String(36),  nullable=True)
+    suspension_reason:   Mapped[Optional[str]] = mapped_column(Text,        nullable=True)
+    suspended_at:        Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    suspended_by:        Mapped[Optional[str]] = mapped_column(String(36),  nullable=True)
+    created_at:          Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at:          Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=_now, nullable=True)
+
+
+class AppClientProfile(Base):
+    """
+    Client profiles — one record per client, linked to their assigned CPA.
+    accounting_status reflects real-time workload (outstanding items, last transaction).
+    """
+    __tablename__ = "app_client_profiles"
+
+    client_id:            Mapped[str]  = mapped_column(String(36),  primary_key=True)
+    business_name:        Mapped[str]  = mapped_column(String(500), nullable=False)
+    ein_pr:               Mapped[str]  = mapped_column(String(20),  nullable=False)
+    business_type:        Mapped[str]  = mapped_column(String(30),  nullable=False, default="CORPORATION")
+    municipality_pr:      Mapped[str]  = mapped_column(String(100), nullable=False, default="San Juan")
+    assigned_cpa_license: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    accounting_status:    Mapped[str]  = mapped_column(String(30),  nullable=False, default="UP_TO_DATE", index=True)
+    last_transaction_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    outstanding_items:    Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    alert_thresholds:     Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    created_at:           Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at:           Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=_now, nullable=True)
+
+
+class AppCpaClientAssignment(Base):
+    """
+    Maps CPAs to their assigned clients.
+    Table name 'cpa_client_assignments' matches the raw SQL used in tax_forms.py.
+    """
+    __tablename__ = "cpa_client_assignments"
+
+    id:          Mapped[str]  = mapped_column(String(36),  primary_key=True, default=_uuid)
+    cpa_license: Mapped[str]  = mapped_column(String(100), nullable=False, index=True)
+    client_id:   Mapped[str]  = mapped_column(String(36),  nullable=False, index=True)
+    assigned_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    assigned_by: Mapped[str]  = mapped_column(String(36),  nullable=False)
+    is_active:   Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class AppFiscalRule(Base):
+    """
+    Puerto Rico fiscal rules registry.
+    DRAFT → ACTIVE (after admin approval); ACTIVE → SUPERSEDED (when a new version is approved).
+    """
+    __tablename__ = "app_fiscal_rules"
+
+    rule_id:          Mapped[str]  = mapped_column(String(36),  primary_key=True, default=_uuid)
+    rule_code:        Mapped[str]  = mapped_column(String(100), unique=True, nullable=False, index=True)
+    rule_name:        Mapped[str]  = mapped_column(String(255), nullable=False)
+    rule_type:        Mapped[str]  = mapped_column(String(30),  nullable=False)   # TAX_RATE, BRACKET, EXEMPTION, DEADLINE, WITHHOLDING, SUTA
+    jurisdiction:     Mapped[str]  = mapped_column(String(20),  nullable=False, default="PR")
+    form_types:       Mapped[Optional[List[str]]] = mapped_column(JSONB, nullable=True)
+    value_json:       Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    status:           Mapped[str]  = mapped_column(String(20),  nullable=False, default="DRAFT", index=True)
+    effective_date:   Mapped[str]  = mapped_column(String(10),  nullable=False)
+    supersedes_rule_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    superseded_at:    Mapped[Optional[str]] = mapped_column(String(10),  nullable=True)
+    created_by:       Mapped[str]  = mapped_column(String(36),  nullable=False)
+    approved_by:      Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    approved_at:      Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    rejection_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notes:            Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at:       Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at:       Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=_now, nullable=True)
+
+
+class AppLearningCard(Base):
+    """
+    Anonymized learning contributions from CPA corrections.
+    PENDING_APPROVAL → APPROVED/REJECTED by EXIMIA_ADMIN.
+    contributed_by_hash is SHA-256 of CPA license — never the actual license.
+    """
+    __tablename__ = "app_learning_cards"
+
+    card_id:                 Mapped[str]  = mapped_column(String(36),  primary_key=True, default=_uuid)
+    card_type:               Mapped[str]  = mapped_column(String(50),  nullable=False, index=True)
+    anonymized_description:  Mapped[str]  = mapped_column(Text,        nullable=False)
+    original_agent_decision: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    cpa_correction:          Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    context_tags:            Mapped[Optional[List[str]]] = mapped_column(JSONB, nullable=True)
+    status:                  Mapped[str]  = mapped_column(String(30),  nullable=False, default="PENDING_APPROVAL", index=True)
+    approved_by:             Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    approved_at:             Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    rejection_reason:        Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    contributed_by_hash:     Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # SHA-256 of CPA license
+    created_at:              Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+
+
+class AppSubscription(Base):
+    """Client billing subscriptions managed by EXIMIA_ADMIN."""
+    __tablename__ = "app_subscriptions"
+
+    subscription_id:      Mapped[str]  = mapped_column(String(36),  primary_key=True, default=_uuid)
+    client_id:            Mapped[str]  = mapped_column(String(36),  nullable=False, index=True)
+    plan_type:            Mapped[str]  = mapped_column(String(30),  nullable=False, default="STARTER")
+    status:               Mapped[str]  = mapped_column(String(20),  nullable=False, default="ACTIVE", index=True)
+    mrr_usd:              Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0.00"))
+    billing_cycle:        Mapped[str]  = mapped_column(String(10),  nullable=False, default="MONTHLY")
+    current_period_start: Mapped[str]  = mapped_column(String(10),  nullable=False)
+    current_period_end:   Mapped[str]  = mapped_column(String(10),  nullable=False)
+    last_payment_at:      Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_payment_amount:  Mapped[Optional[Decimal]]  = mapped_column(Numeric(10, 2), nullable=True)
+    failed_payments:      Mapped[int]  = mapped_column(Integer, default=0, nullable=False)
+    cancellation_reason:  Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cancelled_at:         Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at:           Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at:           Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=_now, nullable=True)
+
+
+class AppSystemAlert(Base):
+    """System monitoring alerts created by agent health checks or manually by EXIMIA_ADMIN."""
+    __tablename__ = "app_system_alerts"
+
+    alert_id:      Mapped[str]  = mapped_column(String(36),  primary_key=True, default=_uuid)
+    alert_type:    Mapped[str]  = mapped_column(String(50),  nullable=False, index=True)
+    severity:      Mapped[str]  = mapped_column(String(20),  nullable=False, default="MEDIUM")
+    title:         Mapped[str]  = mapped_column(String(255), nullable=False)
+    message:       Mapped[str]  = mapped_column(Text,        nullable=False)
+    component:     Mapped[str]  = mapped_column(String(100), nullable=False)
+    is_resolved:   Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    resolved_at:   Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    resolved_by:   Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    metadata_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    created_at:    Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
