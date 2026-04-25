@@ -190,3 +190,76 @@ class FormSignRequest(BaseModel):
         if not self.declaration_accepted:
             raise ValueError("CPA must accept the declaration to sign a tax form")
         return self
+
+
+# ---------------------------------------------------------------------------
+# Preparer layer — transaction-level traceability models
+# ---------------------------------------------------------------------------
+
+class PreparedFormLine(BaseModel):
+    """
+    A single line on a prepared tax form, with full traceability.
+
+    Unlike FormLine (used in the CPA-signing flow), this includes:
+    - transaction_ids[] — exact source transactions for each value
+    - calc_hash — SHA-256 from the Calculation Sandbox run
+    - sandbox_code_executed — the exact Python code that produced this value
+    - legal_basis — citation to specific PR tax code section
+    """
+    model_config = ConfigDict(frozen=True)
+
+    line_number:             str
+    description:             str
+    value:                   Optional[Decimal]  = None
+    text_value:              Optional[str]      = None
+    transaction_ids:         List[str]          = Field(default_factory=list)
+    rule_ref:                Optional[str]      = None
+    calc_hash:               Optional[str]      = None
+    sandbox_code_executed:   Optional[str]      = None
+    legal_basis:             Optional[str]      = None
+
+
+class TaxPackage(BaseModel):
+    """
+    Paquete de planilla fiscal lista para revisión del CPA.
+
+    Generada íntegramente por el sistema autónomo (SYSTEM_AUTONOMOUS).
+    CPA revisa, anota, y firma digitalmente.
+    """
+    model_config = ConfigDict(frozen=True)
+
+    form_id:                    str  = Field(default_factory=lambda: str(uuid.uuid4()))
+    form_type:                  str   # "SC2915", "941PR", "W2PR", "SC2200", "F480"
+    client_id:                  str
+    period:                     str   # "2025-01" | "2025-Q1" | "2025"
+    prepared_at:                datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    prepared_by:                str   = "SYSTEM_AUTONOMOUS"
+    status:                     str   = "PENDING_CPA_REVIEW"
+    lines:                      List[PreparedFormLine] = Field(default_factory=list)
+    cross_verification_results: Dict[str, Any]         = Field(default_factory=dict)
+    confidence_score:           float                  = 1.0
+    issues_detected:            List[str]              = Field(default_factory=list)
+    cpa_notes_required:         List[str]              = Field(default_factory=list)
+
+
+class MissingDataError(Exception):
+    """Required data is absent — the form cannot be prepared."""
+    def __init__(self, form_type: str, missing: List[str]) -> None:
+        self.form_type = form_type
+        self.missing   = missing
+        super().__init__(
+            f"{form_type}: {len(missing)} item(s) required but missing — "
+            + "; ".join(missing)
+        )
+
+
+class CrossVerificationError(Exception):
+    """Cross-form consistency check failed — package cannot be finalised."""
+    def __init__(self, failures: List[str]) -> None:
+        self.failures = failures
+        super().__init__(
+            f"{len(failures)} cross-verification failure(s): "
+            + "; ".join(failures)
+        )
