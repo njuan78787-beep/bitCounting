@@ -1,4 +1,5 @@
 import { Header, SystemHealthStrip } from '../../components/layout/Header'
+import { NucleusAndromeda } from '../../components/shared/NucleusAndromeda'
 import { DocumentUpload } from './DocumentUpload'
 import { TransactionList } from './TransactionList'
 import { FinancialSummary } from './FinancialSummary'
@@ -47,6 +48,9 @@ export function ClientDashboard() {
       />
 
       <div className="flex-1 p-4 sm:p-6 space-y-6 overflow-y-auto">
+        {/* AI nucleus visual */}
+        <NucleusAndromeda className="w-full h-64 sm:h-80 rounded-xl" />
+
         {/* KPI strip */}
         <div className="grid grid-cols-3 gap-3">
           {stats.map((s) => (
