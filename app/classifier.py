@@ -11,7 +11,7 @@ CATEGORIES = {
     "shopping":   {"label": "Compras",              "color": "#0891b2", "icon": "shopping-bag"},
     "messaging":  {"label": "Mensajería",           "color": "#16a34a", "icon": "message-circle"},
     "news":       {"label": "Noticias",             "color": "#64748b", "icon": "newspaper"},
-    "evasion":    {"label": "Evasión (VPN/proxy)",  "color": "#9333ea", "icon": "venetian-mask"},
+    "evasion":    {"label": "Intentos de evadir el control", "color": "#9333ea", "icon": "shield-off"},
     "other":      {"label": "Otros",                "color": "#94a3b8", "icon": "globe"},
 }
 
