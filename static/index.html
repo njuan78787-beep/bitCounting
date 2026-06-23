@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#11182a">
+<title>KidSafe — Control parental del hogar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script>
+tailwind.config = {
+  theme: { extend: {
+    fontFamily: { display:['"Plus Jakarta Sans"','sans-serif'], body:['Inter','sans-serif'] },
+    colors: {
+      ink:'#11182a', slatey:'#5b6b8c', mist:'#f5f7fc', card:'#ffffff',
+      brand:'#3d5afe', ok:'#12b886', warn:'#f59f00', danger:'#e8476f',
+      line:'#e7ebf3'
+    },
+    boxShadow:{ soft:'0 2px 8px rgba(17,24,42,.05), 0 12px 32px rgba(17,24,42,.06)' }
+  }}
+}
+</script>
+<style>
+  body{font-family:Inter,sans-serif;background:#f5f7fc;color:#11182a}
+  h1,h2,h3,.display{font-family:'Plus Jakarta Sans',sans-serif}
+  .ringpop{transition:transform .15s ease, box-shadow .15s ease}
+  .ringpop:active{transform:scale(.97)}
+  .tab.active{color:#3d5afe}
+  .tab.active .tabdot{opacity:1}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#dde3ef;border-radius:9px;border:2px solid #f5f7fc}
+  .fade{animation:fade .25s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .switch{width:46px;height:28px;border-radius:99px;background:#d7deea;position:relative;transition:.2s;cursor:pointer;flex:none}
+  .switch.on{background:#12b886}
+  .switch i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:99px;background:#fff;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+  .switch.on i{left:21px}
+  .day-btn{border-radius:99px;padding:4px 9px;font-size:12px;font-weight:700;border:1.5px solid #e7ebf3;background:#f5f7fc;color:#5b6b8c;cursor:pointer;transition:.15s}
+  .day-btn.sel{background:#3d5afe;color:#fff;border-color:#3d5afe}
+  @media(prefers-reduced-motion){.fade{animation:none}.switch,.switch i,.ringpop{transition:none}}
+</style>
+</head>
+<body class="min-h-screen">
+<div id="app" class="max-w-3xl mx-auto"></div>
+
+<script>
+//======================= Núcleo =======================
+const API = "";
+let TOKEN = localStorage.getItem("ks_token") || "";
+let CATS = [];
+let WS = null;
+const $ = (s,el=document)=>el.querySelector(s);
+const $$ = (s,el=document)=>[...el.querySelectorAll(s)];
+const h = (html)=>{const t=document.createElement("template");t.innerHTML=html.trim();return t.content.firstChild;};
+const esc = (s)=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function api(path, opts={}){
+  const r = await fetch(API+path, {
+    ...opts,
+    headers:{ "Content-Type":"application/json",
+      ...(TOKEN?{"Authorization":"Bearer "+TOKEN}:{}), ...(opts.headers||{}) }
+  });
+  if(r.status===401){ TOKEN=""; localStorage.removeItem("ks_token"); route("login"); throw new Error("401"); }
+  if(!r.ok){ let m="Error"; try{m=(await r.json()).detail||m}catch{}; throw new Error(m); }
+  if(r.status===204) return null;
+  return r.json();
+}
+
+const ICONS = (name,cls="w-5 h-5")=>`<i data-lucide="${name}" class="${cls}"></i>`;
+function draw(){ if(window.lucide) lucide.createIcons(); }
+
+function toast(msg, kind="ok"){
+  const c = {ok:"bg-ok", warn:"bg-warn", danger:"bg-danger"}[kind]||"bg-ink";
+  const t = h(`<div class="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 ${c} text-white px-4 py-2.5 rounded-2xl shadow-soft text-sm font-medium fade">${esc(msg)}</div>`);
+  document.body.appendChild(t); setTimeout(()=>t.remove(), 2200);
+}
+
+//======================= Helpers de horario =======================
+const DAY_NAMES = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
+
+function scheduleText(s){
+  if(!s) return "Siempre";
+  const days = s.days;
+  let dayStr;
+  if(!days || days.length===7) dayStr = "todos los días";
+  else if(days.length===0) dayStr = "ningún día";
+  else if(JSON.stringify([...days].sort((a,b)=>a-b))===JSON.stringify([0,1,2,3,4])) dayStr = "lun–vie";
+  else if(JSON.stringify([...days].sort((a,b)=>a-b))===JSON.stringify([5,6])) dayStr = "sáb–dom";
+  else dayStr = days.map(d=>DAY_NAMES[d]).join(", ");
+  const from = s.from||"";
+  const to   = s.to||"";
+  return `${from}–${to} · ${dayStr}`;
+}
+
+//======================= Arranque =======================
+async function boot(){
+  try{
+    const st = await fetch(API+"/api/setup/status").then(r=>r.json());
+    if(!st.configured){ return route("setup"); }
+    if(!TOKEN){ return route("login"); }
+    CATS = await api("/api/categories");
+    route("home");
+  }catch(e){ route("login"); }
+}
+
+function route(view, arg){
+  if(WS && view!=="feed" && view!=="home" && view!=="child"){ try{WS.close()}catch{} WS=null; }
+  const r = { setup:Setup, login:Login, home:Home, child:Child, devices:Devices,
+              feed:Feed, alerts:Alerts, settings:Settings }[view] || Home;
+  r(arg);
+}
+
+//======================= Shell con navegación inferior =======================
+function shell(title, body, active, opts={}){
+  const back = opts.back ? `<button onclick="route('${opts.back}')" class="ringpop p-2 -ml-2 rounded-xl">${ICONS('chevron-left','w-6 h-6 text-ink')}</button>` : `<div class="w-8"></div>`;
+  const action = opts.action || `<div class="w-8"></div>`;
+  const app = $("#app");
+  app.innerHTML = "";
+  app.appendChild(h(`<div class="pb-28 min-h-screen">
+    <header class="sticky top-0 z-30 bg-mist/85 backdrop-blur px-4 pt-3 pb-2 flex items-center justify-between">
+      ${back}<h1 class="display text-lg font-extrabold tracking-tight">${esc(title)}</h1>${action}
+    </header>
+    <main class="px-4 fade">${body}</main>
+  </div>`));
+  if(active) app.appendChild(navbar(active));
+  draw();
+}
+
+function navbar(active){
+  const items = [
+    ["home","Inicio","house"],["devices","Dispositivos","smartphone"],
+    ["feed","En vivo","activity"],["alerts","Alertas","bell"],["settings","Ajustes","settings"]
+  ];
+  const nav = h(`<nav class="fixed bottom-0 inset-x-0 z-40 border-t border-line bg-white/95 backdrop-blur">
+    <div class="max-w-3xl mx-auto grid grid-cols-5">
+      ${items.map(([k,l,ic])=>`<button onclick="route('${k}')" class="tab ${k===active?'active':''} flex flex-col items-center gap-1 py-2.5 text-slatey">
+        <span class="relative">${ICONS(ic,'w-[22px] h-[22px]')}<span class="tabdot absolute -bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-brand opacity-0"></span></span>
+        <span class="text-[11px] font-semibold">${l}</span></button>`).join("")}
+    </div></nav>`);
+  return nav;
+}
+
+//======================= 1. Wizard de configuración =======================
+let SETUP = { step:1, devices:[], assign:{}, profiles:[] };
+
+function Setup(){
+  const steps = ["Contraseña","Hijos","Dispositivos","Listo"];
+  const body = `
+  <div class="pt-6">
+    <div class="flex items-center justify-center gap-1.5 mb-8">
+      ${steps.map((s,i)=>`<div class="h-1.5 rounded-full ${i<SETUP.step?'bg-brand w-8':'bg-line w-5'} transition-all"></div>`).join("")}
+    </div>
+    <div id="setupbody"></div>
+  </div>`;
+  $("#app").innerHTML = `<div class="max-w-md mx-auto px-5 min-h-screen">${body}</div>`;
+  renderSetupStep();
+}
+
+function renderSetupStep(){
+  const b = $("#setupbody"); b.classList.add("fade");
+  if(SETUP.step===1){
+    b.innerHTML = `
+      <div class="text-center mb-6">
+        <div class="text-5xl mb-3">🛡️</div>
+        <h2 class="display text-2xl font-extrabold">Bienvenido a KidSafe</h2>
+        <p class="text-slatey mt-2">Crea una contraseña para entrar al panel.</p>
+      </div>
+      <input id="pw" type="password" placeholder="Nueva contraseña" class="w-full px-4 py-3.5 rounded-2xl border border-line bg-white outline-none focus:border-brand text-lg mb-3">
+      <input id="pw2" type="password" placeholder="Repite la contraseña" class="w-full px-4 py-3.5 rounded-2xl border border-line bg-white outline-none focus:border-brand text-lg">
+      <button onclick="setupPw()" class="ringpop w-full mt-5 bg-brand text-white font-bold py-3.5 rounded-2xl">Continuar</button>`;
+  }
+  else if(SETUP.step===2){
+    b.innerHTML = `
+      <div class="text-center mb-5">
+        <div class="text-4xl mb-2">👨‍👩‍👧‍👦</div>
+        <h2 class="display text-2xl font-extrabold">¿Quiénes son tus hijos?</h2>
+        <p class="text-slatey mt-2">Agrega a cada hijo. Luego les asignas sus dispositivos.</p>
+      </div>
+      <div id="kidlist" class="space-y-2 mb-4"></div>
+      <button onclick="addKidRow()" class="ringpop w-full border-2 border-dashed border-line text-slatey font-semibold py-3 rounded-2xl flex items-center justify-center gap-2">${ICONS('plus','w-5 h-5')} Agregar hijo</button>
+      <button onclick="setupKids()" class="ringpop w-full mt-5 bg-brand text-white font-bold py-3.5 rounded-2xl">Continuar</button>`;
+    if(SETUP.profiles.length===0) addKidRow();
+    else renderKidRows();
+  }
+  else if(SETUP.step===3){
+    b.innerHTML = `
+      <div class="text-center mb-4">
+        <div class="text-4xl mb-2">📡</div>
+        <h2 class="display text-2xl font-extrabold">Tus dispositivos</h2>
+        <p class="text-slatey mt-2">Busca los aparatos conectados y asígnalos a cada hijo.</p>
+      </div>
+      <button onclick="scanDevices()" id="scanbtn" class="ringpop w-full bg-ink text-white font-semibold py-3 rounded-2xl flex items-center justify-center gap-2 mb-4">${ICONS('radar','w-5 h-5')} Buscar dispositivos</button>
+      <div id="devscan" class="space-y-2"></div>
+      <button onclick="finishSetup()" class="ringpop w-full mt-5 bg-brand text-white font-bold py-3.5 rounded-2xl">Terminar</button>`;
+  }
+  else if(SETUP.step===4){
+    b.innerHTML = `
+      <div class="text-center pt-6">
+        <div class="text-6xl mb-4">✅</div>
+        <h2 class="display text-2xl font-extrabold">¡Todo listo!</h2>
+        <p class="text-slatey mt-2 mb-6">Falta un paso: indicarle a tu router que use KidSafe como su servidor DNS.</p>
+        <div class="bg-white rounded-2xl border border-line p-4 text-left text-sm shadow-soft mb-5">
+          <p class="font-bold mb-2 display">Cómo conectar tu red</p>
+          <ol class="list-decimal ml-5 space-y-1.5 text-slatey">
+            <li>Entra a la configuración de tu router (suele ser <b>192.168.1.1</b>).</li>
+            <li>Busca <b>DNS</b> en los ajustes de red o DHCP.</li>
+            <li>Pon como DNS primario la IP de esta caja KidSafe.</li>
+            <li>Guarda. En unos minutos verás actividad aquí.</li>
+          </ol>
+        </div>
+        <button onclick="boot()" class="ringpop w-full bg-brand text-white font-bold py-3.5 rounded-2xl">Ir al panel</button>
+      </div>`;
+  }
+  draw();
+}
+
+const KID_EMOJIS = ["🧒","👧","👦","🧑","👶","🐯","🦊","🐼","🦄","🐙","🚀","⭐"];
+function addKidRow(){ SETUP.profiles.push({name:"",age:10,emoji:KID_EMOJIS[SETUP.profiles.length%KID_EMOJIS.length],preset:"nino"}); renderKidRows(); }
+function renderKidRows(){
+  const list=$("#kidlist"); if(!list)return; list.innerHTML="";
+  SETUP.profiles.forEach((k,i)=>{
+    const row=h(`<div class="bg-white rounded-2xl border border-line p-3 shadow-soft">
+      <div class="flex items-center gap-3">
+        <button class="text-3xl ringpop" onclick="cycleEmoji(${i})">${k.emoji}</button>
+        <input value="${esc(k.name)}" oninput="SETUP.profiles[${i}].name=this.value" placeholder="Nombre" class="flex-1 px-3 py-2 rounded-xl border border-line outline-none focus:border-brand">
+        <button onclick="SETUP.profiles.splice(${i},1);renderKidRows()" class="p-2 text-slatey ringpop">${ICONS('trash-2','w-5 h-5')}</button>
+      </div>
+      <div class="grid grid-cols-3 gap-2 mt-2">
+        ${[["pequeno","Pequeño 3–7"],["nino","Niño 8–12"],["adolescente","Teen 13–17"]].map(([v,l])=>
+          `<button onclick="SETUP.profiles[${i}].preset='${v}';renderKidRows()" class="text-xs font-semibold py-2 rounded-xl border ${k.preset===v?'border-brand bg-brand/5 text-brand':'border-line text-slatey'}">${l}</button>`).join("")}
+      </div></div>`);
+    list.appendChild(row);
+  });
+  draw();
+}
+function cycleEmoji(i){ const cur=KID_EMOJIS.indexOf(SETUP.profiles[i].emoji); SETUP.profiles[i].emoji=KID_EMOJIS[(cur+1)%KID_EMOJIS.length]; renderKidRows(); }
+
+async function setupPw(){
+  const pw=$("#pw").value, pw2=$("#pw2").value;
+  if(pw.length<4) return toast("Mínimo 4 caracteres","warn");
+  if(pw!==pw2) return toast("Las contraseñas no coinciden","warn");
+  try{ const r=await fetch(API+"/api/setup/password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})}).then(x=>x.json());
+    TOKEN=r.token; localStorage.setItem("ks_token",TOKEN); SETUP.step=2; renderSetupStep();
+  }catch(e){ toast("No se pudo guardar","danger"); }
+}
+async function setupKids(){
+  const valid=SETUP.profiles.filter(k=>k.name.trim());
+  if(!valid.length) return toast("Agrega al menos un hijo","warn");
+  SETUP.profiles=valid;
+  for(const k of SETUP.profiles){ const r=await api("/api/profiles",{method:"POST",body:JSON.stringify(k)}); k.id=r.id; }
+  SETUP.step=3; renderSetupStep();
+}
+async function scanDevices(){
+  const btn=$("#scanbtn"); btn.innerHTML="Buscando…";
+  try{ await api("/api/devices/discover",{method:"POST"}); }catch{}
+  const devs=await api("/api/devices");
+  SETUP.devices=devs;
+  const box=$("#devscan");
+  if(!devs.length){ box.innerHTML=`<p class="text-center text-slatey text-sm py-4">Aún no aparecen dispositivos. Asegúrate de que estén conectados al WiFi y vuelve a buscar.</p>`; }
+  else box.innerHTML = devs.map(d=>deviceAssignRow(d)).join("");
+  btn.innerHTML=`${ICONS('radar','w-5 h-5')} Buscar de nuevo`;
+  draw();
+}
+function deviceAssignRow(d){
+  const opts = `<option value="">Sin asignar</option>`+SETUP.profiles.map(p=>`<option value="${p.id}" ${d.profile_id==p.id?'selected':''}>${esc(p.emoji+" "+p.name)}</option>`).join("");
+  return `<div class="bg-white rounded-2xl border border-line p-3 flex items-center gap-3 shadow-soft">
+    <div class="w-9 h-9 rounded-xl bg-mist flex items-center justify-center">${ICONS('smartphone','w-5 h-5 text-slatey')}</div>
+    <div class="flex-1 min-w-0"><p class="font-semibold truncate text-sm">${esc(d.label)}</p><p class="text-xs text-slatey">${esc(d.vendor||d.ip)}</p></div>
+    <select onchange="assignDevice(${d.id},this.value)" class="text-sm border border-line rounded-xl px-2 py-1.5 bg-white max-w-[40%]">${opts}</select>
+  </div>`;
+}
+async function assignDevice(id,pid){ await api("/api/devices/"+id,{method:"PATCH",body:JSON.stringify({profile_id:pid?parseInt(pid):null})}); toast("Asignado"); }
+function finishSetup(){ SETUP.step=4; renderSetupStep(); }
+
+//======================= Login =======================
+function Login(){
+  $("#app").innerHTML = `<div class="max-w-md mx-auto px-5 min-h-screen flex flex-col justify-center fade">
+    <div class="text-center mb-8"><div class="text-5xl mb-3">🛡️</div>
+      <h2 class="display text-2xl font-extrabold">KidSafe</h2>
+      <p class="text-slatey mt-1">Ingresa tu contraseña</p></div>
+    <input id="lpw" type="password" placeholder="Contraseña" class="w-full px-4 py-3.5 rounded-2xl border border-line bg-white outline-none focus:border-brand text-lg"
+      onkeydown="if(event.key==='Enter')doLogin()">
+    <button onclick="doLogin()" class="ringpop w-full mt-4 bg-brand text-white font-bold py-3.5 rounded-2xl">Entrar</button>
+  </div>`;
+  setTimeout(()=>$("#lpw")?.focus(),100);
+}
+async function doLogin(){
+  try{ const r=await fetch(API+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:$("#lpw").value})}).then(x=>x.json().then(j=>({ok:x.ok,j})));
+    if(!r.ok) return toast(r.j.detail||"Contraseña incorrecta","danger");
+    TOKEN=r.j.token; localStorage.setItem("ks_token",TOKEN); boot();
+  }catch(e){ toast("Error de conexión","danger"); }
+}
+
+//======================= Home =======================
+async function Home(){
+  let st; try{ st=await api("/api/state"); }catch{ return; }
+  const banner = st.new_devices>0 ? `<button onclick="route('devices')" class="w-full bg-brand/10 text-brand rounded-2xl px-4 py-3 mb-4 flex items-center gap-2 font-semibold text-sm ringpop">${ICONS('sparkles','w-5 h-5')} ${st.new_devices} dispositivo(s) nuevo(s) por asignar</button>` : "";
+  const cards = st.children.length ? st.children.map(childCard).join("") :
+    `<div class="text-center text-slatey py-16"><div class="text-4xl mb-3">👶</div><p>Aún no hay hijos. Agrégalos en Ajustes.</p></div>`;
+  shell("Tu hogar", banner+`<div class="space-y-3">${cards}</div>`, "home");
+  draw();
+  startFeed();
+}
+
+function childCard(c){
+  const status = c.paused
+    ? `<span class="inline-flex items-center gap-1 text-warn bg-warn/10 px-2.5 py-1 rounded-full text-xs font-bold">${ICONS('pause','w-3.5 h-3.5')} En pausa</span>`
+    : `<span class="inline-flex items-center gap-1 text-ok bg-ok/10 px-2.5 py-1 rounded-full text-xs font-bold">${ICONS('check','w-3.5 h-3.5')} Activo</span>`;
+  const top = c.top_sites.length
+    ? c.top_sites.map(s=>`<span class="text-xs bg-mist px-2 py-1 rounded-lg text-slatey">${esc(s.domain)}</span>`).join(" ")
+    : `<span class="text-xs text-slatey/70">Sin actividad hoy</span>`;
+  const blocked = c.blocked_today>0 ? `<div class="flex items-center gap-1.5 text-danger"><span class="font-extrabold display text-lg">${c.blocked_today}</span><span class="text-xs">bloqueos</span></div>` : `<div class="text-xs text-slatey/70">0 bloqueos</div>`;
+  return `<button onclick="route('child',${c.id})" class="ringpop w-full text-left bg-white rounded-3xl border border-line p-4 shadow-soft block">
+    <div class="flex items-center gap-3">
+      <div class="text-3xl w-14 h-14 rounded-2xl bg-mist flex items-center justify-center flex-none">${c.emoji}</div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center justify-between"><h3 class="display font-extrabold text-lg">${esc(c.name)}</h3>${status}</div>
+        <div class="flex items-center gap-3 mt-0.5 text-sm text-slatey">
+          <span class="flex items-center gap-1">${ICONS('globe','w-4 h-4')} ${c.queries_today}</span>${blocked}
+          <span class="flex items-center gap-1">${ICONS('smartphone','w-4 h-4')} ${c.device_count}</span>
+        </div>
+      </div>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-1.5">${top}</div>
+  </button>`;
+}
+
+//======================= Detalle de un hijo =======================
+let CHILD_PID = null;
+
+async function Child(pid){
+  CHILD_PID = pid;
+  let profs, act, rules;
+  try{
+    [profs, act, rules] = await Promise.all([
+      api("/api/profiles"),
+      api(`/api/profiles/${pid}/activity?range=today`),
+      api(`/api/profiles/${pid}/rules`)
+    ]);
+  }catch{ return; }
+  const p = profs.find(x=>x.id==pid); if(!p) return route("home");
+  const rep = await api(`/api/reports/${pid}?range=today`).catch(()=>({text:""}));
+
+  // Mapa categoría → horario
+  const catSchedules = {};
+  rules.forEach(r=>{ if(r.scope==='category'&&r.action==='block') catSchedules[r.value]=r.schedule; });
+  const bedtimeRule = rules.find(r=>r.scope==='bedtime');
+  const bedtime = bedtimeRule?.schedule||null;
+
+  const paused = p.paused_until && new Date(p.paused_until)>new Date();
+  const pauseBtns = paused
+    ? `<button onclick="pauseKid(${pid},0)" class="ringpop col-span-3 bg-ok/10 text-ok font-bold py-3 rounded-2xl flex items-center justify-center gap-2">${ICONS('play','w-5 h-5')} Reanudar internet</button>`
+    : [15,30,60].map(m=>`<button onclick="pauseKid(${pid},${m})" class="ringpop bg-ink text-white font-semibold py-3 rounded-2xl text-sm">Pausar ${m}m</button>`).join("");
+
+  const cat = act.by_category.filter(c=>c.count>0).sort((a,b)=>b.count-a.count);
+  const maxc = Math.max(1,...cat.map(c=>c.count));
+  const bars = cat.length ? cat.map(c=>`
+    <div class="flex items-center gap-2 text-sm">
+      <span class="w-28 truncate text-slatey">${esc(c.label)}</span>
+      <div class="flex-1 h-2.5 rounded-full bg-mist overflow-hidden"><div class="h-full rounded-full" style="width:${Math.round(c.count/maxc*100)}%;background:${c.color}"></div></div>
+      <span class="w-8 text-right font-semibold">${c.count}</span>
+    </div>`).join("") : `<p class="text-slatey text-sm">Sin actividad hoy todavía.</p>`;
+
+  // Categorías con toggle + horario
+  const catRows = CATS.map(ct=>{
+    const on = p.blocked_categories.includes(ct.key);
+    const sched = on ? (catSchedules[ct.key] || null) : null;
+    const schedBadge = on
+      ? `<button onclick="openCatSchedule(${pid},'${ct.key}')" title="Configurar horario"
+           class="ringpop inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-xl
+           ${sched?'bg-brand/10 text-brand':'bg-mist text-slatey'} whitespace-nowrap">
+           ${ICONS('clock','w-3 h-3')}${esc(scheduleText(sched))}
+         </button>`
+      : `<span class="text-xs text-slatey/40 px-2">Permitido</span>`;
+    return `<div class="flex items-center justify-between w-full px-3 py-2.5 rounded-2xl border ${on?'border-danger/20 bg-danger/5':'border-line bg-white'}">
+      <button onclick="toggleCat(${pid},'${ct.key}',${!on})" class="flex items-center gap-2 text-sm font-medium flex-1 text-left">
+        <span class="w-2.5 h-2.5 rounded-full flex-none" style="background:${ct.color}"></span>
+        ${esc(ct.label)}
+        ${on?`<span class="text-[10px] font-bold text-danger">●</span>`:''}
+      </button>
+      ${schedBadge}
+    </div>`;
+  }).join("");
+
+  // Hora de dormir
+  const bedtimeCard = `
+    <section class="bg-white rounded-3xl border border-line p-4 shadow-soft">
+      <div class="flex items-center justify-between mb-1">
+        <h3 class="display font-bold flex items-center gap-2">${ICONS('moon','w-5 h-5 text-brand')} Hora de dormir</h3>
+        <button onclick="openBedtime(${pid})" class="ringpop text-sm font-semibold text-brand px-3 py-1.5 rounded-xl bg-brand/10">
+          ${bedtime ? 'Cambiar' : 'Configurar'}
+        </button>
+      </div>
+      <p class="text-xs text-slatey mb-2">Bloquea todo el internet en una franja horaria.</p>
+      ${bedtime
+        ? `<div class="flex items-center gap-2 bg-brand/5 rounded-xl px-3 py-2 text-sm font-semibold text-brand">
+             ${ICONS('clock','w-4 h-4')}${esc(scheduleText(bedtime))}
+             <button onclick="clearBedtime(${pid})" class="ml-auto text-slatey ringpop">${ICONS('x','w-4 h-4')}</button>
+           </div>`
+        : `<p class="text-sm text-slatey/60">Sin horario de sueño configurado.</p>`
+      }
+    </section>`;
+
+  const recent = act.recent.slice(0,20).map(rowFeed).join("") || `<p class="text-slatey text-sm">Sin registros.</p>`;
+
+  shell(p.emoji+" "+p.name, `
+    <div class="space-y-4 pt-1">
+      ${rep.text?`<div class="bg-white rounded-2xl border border-line p-4 shadow-soft text-sm text-ink/90">${esc(rep.text)}</div>`:""}
+      <div class="grid grid-cols-3 gap-2">${pauseBtns}</div>
+
+      <section class="bg-white rounded-3xl border border-line p-4 shadow-soft">
+        <h3 class="display font-bold mb-3 flex items-center gap-2">${ICONS('chart-no-axes-column','w-5 h-5 text-brand')} Actividad de hoy</h3>
+        <div class="space-y-2">${bars}</div>
+      </section>
+
+      <section class="bg-white rounded-3xl border border-line p-4 shadow-soft">
+        <h3 class="display font-bold mb-1 flex items-center gap-2">${ICONS('shield','w-5 h-5 text-brand')} Qué puede ver</h3>
+        <p class="text-xs text-slatey mb-3">Toca para bloquear/permitir. El reloj ${ICONS('clock','w-3 h-3 inline')} ajusta el horario.</p>
+        <div class="space-y-2">${catRows}</div>
+      </section>
+
+      ${bedtimeCard}
+
+      <section class="bg-white rounded-3xl border border-line p-4 shadow-soft">
+        <h3 class="display font-bold mb-3 flex items-center gap-2">${ICONS('history','w-5 h-5 text-brand')} Últimos sitios</h3>
+        <div class="space-y-1.5">${recent}</div>
+      </section>
+    </div>`, "home", {back:"home"});
+  draw();
+}
+
+async function pauseKid(pid,m){ await api(`/api/profiles/${pid}/pause?minutes=${m}`,{method:"POST"}); toast(m?`Pausado ${m} min`:"Reanudado"); Child(pid); }
+async function toggleCat(pid,cat,block){ await api(`/api/profiles/${pid}/category`,{method:"POST",body:JSON.stringify({category:cat,block})}); toast(block?"Bloqueado":"Permitido"); Child(pid); }
+
+function rowFeed(q){
+  const c = CATS.find(x=>x.key===q.category) || {color:"#94a3b8",label:"Otros"};
+  const t = new Date(q.ts).toLocaleTimeString("es",{hour:"2-digit",minute:"2-digit"});
+  const blk = q.action==="blocked";
+  return `<div class="flex items-center gap-2.5 text-sm">
+    <span class="w-2 h-2 rounded-full flex-none" style="background:${c.color}"></span>
+    <span class="flex-1 truncate ${blk?'text-danger line-through opacity-70':''}">${esc(q.domain)}</span>
+    ${blk?`<span class="text-[10px] font-bold text-danger bg-danger/10 px-1.5 py-0.5 rounded">BLOQUEADO</span>`:""}
+    <span class="text-xs text-slatey/70 tabular-nums">${t}</span></div>`;
+}
+
+//======================= Modal de horario por categoría =======================
+let _schPid=null, _schCat=null;
+
+function openCatSchedule(pid, cat){
+  _schPid=pid; _schCat=cat;
+  // Cargar horario actual
+  api(`/api/profiles/${pid}/rules`).then(rules=>{
+    const r = rules.find(x=>x.scope==='category'&&x.value===cat);
+    const s = r?.schedule || null;
+    _showScheduleModal({
+      title: `Horario — ${CATS.find(x=>x.key===cat)?.label||cat}`,
+      subtitle: "El bloqueo solo se aplica en estos días y horas. Fuera del horario, el contenido estará permitido.",
+      schedule: s,
+      onSave: async (sch)=>{
+        await api(`/api/profiles/${pid}/category`,{method:"POST",body:JSON.stringify({category:cat,block:true,schedule:sch})});
+        toast("Horario guardado"); Child(pid);
+      },
+      onClear: async ()=>{
+        await api(`/api/profiles/${pid}/category`,{method:"POST",body:JSON.stringify({category:cat,block:true,schedule:null})});
+        toast("Bloqueo siempre activo"); Child(pid);
+      }
+    });
+  });
+}
+
+function openBedtime(pid){
+  api(`/api/profiles/${pid}/rules`).then(rules=>{
+    const r = rules.find(x=>x.scope==='bedtime');
+    const s = r?.schedule || {days:[0,1,2,3,4,5,6],from:"22:00",to:"07:00"};
+    _showScheduleModal({
+      title: "Hora de dormir",
+      subtitle: "En este horario se bloquea todo el internet del hijo, sin excepción.",
+      schedule: s,
+      clearLabel: "Desactivar hora de dormir",
+      onSave: async (sch)=>{
+        await api(`/api/profiles/${pid}/bedtime`,{method:"POST",body:JSON.stringify({schedule:sch})});
+        toast("Hora de dormir guardada"); Child(pid);
+      },
+      onClear: async ()=>{
+        await api(`/api/profiles/${pid}/bedtime`,{method:"POST",body:JSON.stringify({schedule:null})});
+        toast("Hora de dormir desactivada"); Child(pid);
+      }
+    });
+  });
+}
+
+async function clearBedtime(pid){
+  await api(`/api/profiles/${pid}/bedtime`,{method:"POST",body:JSON.stringify({schedule:null})});
+  toast("Hora de dormir desactivada"); Child(pid);
+}
+
+function _showScheduleModal({title, subtitle, schedule, onSave, onClear, clearLabel}){
+  const s = schedule || {days:[0,1,2,3,4,5,6], from:"20:00", to:"07:00"};
+  let selDays = s.days ? [...s.days] : [0,1,2,3,4,5,6];
+
+  const dayBtns = DAY_NAMES.map((d,i)=>
+    `<button class="day-btn ${selDays.includes(i)?'sel':''}" data-day="${i}" onclick="this.classList.toggle('sel');updateSelDays(this.closest('.sch-days'))">${d}</button>`
+  ).join("");
+
+  const m = h(`<div class="fixed inset-0 z-50 bg-ink/50 flex items-end sm:items-center justify-center p-4 fade" onclick="if(event.target===this)this.remove()">
+    <div class="bg-white rounded-3xl p-5 w-full max-w-md shadow-soft">
+      <h3 class="display font-extrabold text-lg mb-1">${esc(title)}</h3>
+      <p class="text-xs text-slatey mb-4">${esc(subtitle)}</p>
+
+      <p class="text-xs font-bold text-slatey uppercase tracking-wide mb-2">Días</p>
+      <div class="sch-days flex flex-wrap gap-1.5 mb-4">${dayBtns}</div>
+
+      <div class="grid grid-cols-2 gap-3 mb-5">
+        <div>
+          <label class="text-xs font-bold text-slatey uppercase tracking-wide block mb-1">Desde</label>
+          <input type="time" id="sch_from" value="${esc(s.from||'20:00')}" class="w-full px-3 py-2.5 rounded-xl border border-line outline-none focus:border-brand text-sm font-semibold">
+        </div>
+        <div>
+          <label class="text-xs font-bold text-slatey uppercase tracking-wide block mb-1">Hasta</label>
+          <input type="time" id="sch_to" value="${esc(s.to||'07:00')}" class="w-full px-3 py-2.5 rounded-xl border border-line outline-none focus:border-brand text-sm font-semibold">
+        </div>
+      </div>
+
+      <div class="flex gap-2">
+        <button onclick="this.closest('.fixed').remove()" class="py-3 px-4 rounded-2xl border border-line font-semibold text-sm">Cancelar</button>
+        <button id="sch_clear" class="py-3 px-4 rounded-2xl border border-line font-semibold text-sm text-slatey">${esc(clearLabel||'Sin horario')}</button>
+        <button id="sch_save" class="flex-1 py-3 rounded-2xl bg-brand text-white font-bold text-sm">Guardar</button>
+      </div>
+    </div>
+  </div>`);
+  document.body.appendChild(m); draw();
+
+  m.querySelector("#sch_save").onclick = async ()=>{
+    const days = $$(".day-btn.sel", m).map(b=>parseInt(b.dataset.day));
+    const from = $("#sch_from").value;
+    const to   = $("#sch_to").value;
+    m.remove();
+    await onSave({days, from, to});
+  };
+  m.querySelector("#sch_clear").onclick = async ()=>{ m.remove(); await onClear(); };
+}
+
+function updateSelDays(container){
+  // Actualizar visual (ya lo hace el toggle de clase)
+}
+
+//======================= Dispositivos =======================
+async function Devices(){
+  let devs, profs;
+  try{ devs=await api("/api/devices"); profs=await api("/api/profiles"); }catch{ return; }
+  const grouped = { nuevos:[], asignados:[], ignorados:[] };
+  devs.forEach(d=> d.ignored?grouped.ignorados.push(d):(d.profile_id?grouped.asignados.push(d):grouped.nuevos.push(d)));
+  const sel = (d)=>`<select onchange="devAssign(${d.id},this.value)" class="text-sm border border-line rounded-xl px-2 py-1.5 bg-white">
+      <option value="">Sin asignar</option>
+      ${profs.map(p=>`<option value="${p.id}" ${d.profile_id==p.id?'selected':''}>${esc(p.emoji+' '+p.name)}</option>`).join("")}
+      <option value="ignore" ${d.ignored?'selected':''}>🚫 Ignorar</option>
+    </select>`;
+  const card=(d)=>`<div class="bg-white rounded-2xl border border-line p-3 flex items-center gap-3 shadow-soft">
+      <div class="w-9 h-9 rounded-xl bg-mist flex items-center justify-center flex-none">${ICONS('smartphone','w-5 h-5 text-slatey')}</div>
+      <div class="flex-1 min-w-0"><input value="${esc(d.label)}" onchange="devRename(${d.id},this.value)" class="font-semibold text-sm bg-transparent outline-none w-full"><p class="text-xs text-slatey">${esc(d.vendor||'')} · ${esc(d.ip)}</p></div>
+      ${sel(d)}</div>`;
+  const sect=(title,arr)=>arr.length?`<div class="mb-5"><p class="text-xs font-bold text-slatey uppercase tracking-wide mb-2">${title}</p><div class="space-y-2">${arr.map(card).join("")}</div></div>`:"";
+  const action=`<button onclick="rescan()" class="ringpop p-2 rounded-xl text-brand">${ICONS('radar','w-6 h-6')}</button>`;
+  shell("Dispositivos", `<div class="pt-1">
+    ${sect("Nuevos por asignar",grouped.nuevos)}
+    ${sect("Asignados",grouped.asignados)}
+    ${sect("Ignorados",grouped.ignorados)}
+    ${devs.length===0?`<div class="text-center text-slatey py-12"><div class="text-4xl mb-3">📡</div><p>Toca el radar para buscar dispositivos en tu red.</p></div>`:""}
+  </div>`,"devices",{action});
+  draw();
+}
+async function rescan(){ toast("Buscando…"); await api("/api/devices/discover",{method:"POST"}); Devices(); }
+async function devRename(id,label){ await api("/api/devices/"+id,{method:"PATCH",body:JSON.stringify({label})}); toast("Nombre guardado"); }
+async function devAssign(id,val){
+  if(val==="ignore") await api("/api/devices/"+id,{method:"PATCH",body:JSON.stringify({ignored:true,profile_id:null})});
+  else await api("/api/devices/"+id,{method:"PATCH",body:JSON.stringify({profile_id:val?parseInt(val):null,ignored:false})});
+  toast("Guardado"); Devices();
+}
+
+//======================= Feed en vivo =======================
+let FEED_ITEMS=[];
+function Feed(){
+  shell("Actividad en vivo", `<div class="pt-1">
+    <div class="flex items-center gap-2 text-sm text-slatey mb-3"><span class="relative flex h-2.5 w-2.5"><span class="animate-ping absolute h-full w-full rounded-full bg-ok opacity-60"></span><span class="rounded-full h-2.5 w-2.5 bg-ok"></span></span> Escuchando tu red…</div>
+    <div id="feedlist" class="space-y-1.5 bg-white rounded-3xl border border-line p-4 shadow-soft min-h-[60vh]">
+      ${FEED_ITEMS.length?FEED_ITEMS.map(rowFeed).join(""):'<p class="text-slatey text-sm">Esperando actividad…</p>'}
+    </div></div>`,"feed");
+  draw(); startFeed(true);
+}
+function startFeed(render){
+  if(WS && WS.readyState===1){ return; }
+  try{
+    const proto = location.protocol==="https:"?"wss":"ws";
+    WS = new WebSocket(`${proto}://${location.host}/api/feed/live?token=${TOKEN}`);
+    WS.onmessage = (e)=>{
+      const ev = JSON.parse(e.data);
+      FEED_ITEMS.unshift(ev); FEED_ITEMS=FEED_ITEMS.slice(0,100);
+      const list=$("#feedlist");
+      if(list){ if(FEED_ITEMS.length===1) list.innerHTML="";
+        const row=h(`<div class="fade">${rowFeed(ev)}</div>`); list.prepend(row); draw();
+        while(list.children.length>100) list.lastChild.remove();
+      }
+    };
+    WS.onclose=()=>{ WS=null; };
+  }catch(e){}
+}
+
+//======================= Alertas =======================
+async function Alerts(){
+  let list; try{ list=await api("/api/alerts"); }catch{ return; }
+  const items = list.length? list.map(a=>`<div class="bg-white rounded-2xl border border-line p-3 flex items-center gap-3 shadow-soft">
+      <div class="w-9 h-9 rounded-xl bg-mist flex items-center justify-center">${ICONS(a.channel==='telegram'?'send':'mail','w-5 h-5 text-slatey')}</div>
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold text-sm capitalize">${esc(a.channel)}</p>
+        <p class="text-xs text-slatey truncate">${esc(a.target)}</p>
+      </div>
+      <button onclick="delAlert(${a.id})" class="p-2 text-slatey ringpop">${ICONS('trash-2','w-5 h-5')}</button>
+    </div>`).join("") : `<p class="text-slatey text-sm text-center py-6">Sin alertas configuradas. Agrégalas abajo.</p>`;
+  shell("Alertas", `<div class="pt-1 space-y-3">
+    <div class="bg-brand/5 rounded-2xl p-4 text-sm text-ink/80">Recibe un aviso cuando un hijo intente acceder a contenido adulto, apuestas o intente saltarse el control.</div>
+    ${items}
+    <div class="grid grid-cols-2 gap-2">
+      <button onclick="addTelegramForm()" class="ringpop bg-white border border-line rounded-2xl py-3 flex items-center justify-center gap-2 font-semibold text-sm">
+        ${ICONS('send','w-4 h-4 text-brand')} Telegram
+      </button>
+      <button onclick="addEmailForm()" class="ringpop bg-white border border-line rounded-2xl py-3 flex items-center justify-center gap-2 font-semibold text-sm">
+        ${ICONS('mail','w-4 h-4 text-brand')} Email
+      </button>
+    </div>
+  </div>`,"alerts");
+  draw();
+}
+
+function addTelegramForm(){
+  const m = h(`<div class="fixed inset-0 z-50 bg-ink/40 flex items-end sm:items-center justify-center p-4 fade" onclick="if(event.target===this)this.remove()">
+    <div class="bg-white rounded-3xl p-5 w-full max-w-md shadow-soft">
+      <h3 class="display font-extrabold text-lg mb-1">Alerta por Telegram</h3>
+      <p class="text-xs text-slatey mb-4">Crea un bot con @BotFather, pega el token aquí y tu chat_id (lo da @userinfobot).</p>
+      <input id="al_token" placeholder="Token del bot" class="w-full px-3 py-3 rounded-2xl border border-line mb-2 outline-none focus:border-brand">
+      <input id="al_chat" placeholder="Tu chat_id" class="w-full px-3 py-3 rounded-2xl border border-line mb-4 outline-none focus:border-brand">
+      <div class="flex gap-2">
+        <button onclick="this.closest('.fixed').remove()" class="flex-1 py-3 rounded-2xl border border-line font-semibold">Cancelar</button>
+        <button onclick="saveTelegram(this)" class="flex-1 py-3 rounded-2xl bg-brand text-white font-bold">Guardar</button>
+      </div>
+    </div></div>`);
+  document.body.appendChild(m); draw();
+}
+async function saveTelegram(btn){
+  const token=$("#al_token").value.trim(), chat=$("#al_chat").value.trim();
+  if(!token||!chat) return toast("Faltan datos","warn");
+  await api("/api/alerts",{method:"POST",body:JSON.stringify({channel:"telegram",target:chat,extra:{token},triggers:"adult,gambling,new_device,evasion"})});
+  btn.closest(".fixed").remove(); toast("Alerta de Telegram agregada"); Alerts();
+}
+
+function addEmailForm(){
+  const m = h(`<div class="fixed inset-0 z-50 bg-ink/40 flex items-end sm:items-center justify-center p-4 fade" onclick="if(event.target===this)this.remove()">
+    <div class="bg-white rounded-3xl p-5 w-full max-w-md shadow-soft overflow-y-auto max-h-[90vh]">
+      <h3 class="display font-extrabold text-lg mb-1">Alerta por Email</h3>
+      <p class="text-xs text-slatey mb-4">Configura el servidor SMTP de tu correo (Gmail, Outlook, etc.).</p>
+
+      <label class="text-xs font-bold text-slatey uppercase tracking-wide block mb-1">Correo de destino</label>
+      <input id="em_to" type="email" placeholder="tumail@gmail.com" class="w-full px-3 py-3 rounded-2xl border border-line mb-3 outline-none focus:border-brand">
+
+      <label class="text-xs font-bold text-slatey uppercase tracking-wide block mb-1">Servidor SMTP</label>
+      <input id="em_host" placeholder="smtp.gmail.com" class="w-full px-3 py-2.5 rounded-2xl border border-line mb-2 outline-none focus:border-brand text-sm">
+
+      <div class="grid grid-cols-2 gap-2 mb-3">
+        <div>
+          <label class="text-xs font-bold text-slatey uppercase tracking-wide block mb-1">Puerto</label>
+          <input id="em_port" type="number" value="587" class="w-full px-3 py-2.5 rounded-2xl border border-line outline-none focus:border-brand text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-bold text-slatey uppercase tracking-wide block mb-1">Usuario</label>
+          <input id="em_user" placeholder="tumail@gmail.com" class="w-full px-3 py-2.5 rounded-2xl border border-line outline-none focus:border-brand text-sm">
+        </div>
+      </div>
+
+      <label class="text-xs font-bold text-slatey uppercase tracking-wide block mb-1">Contraseña de app</label>
+      <input id="em_pw" type="password" placeholder="Contraseña o clave de aplicación" class="w-full px-3 py-2.5 rounded-2xl border border-line mb-4 outline-none focus:border-brand text-sm">
+
+      <div class="bg-mist rounded-xl p-3 text-xs text-slatey mb-4">
+        <b>Gmail:</b> Activa "Contraseñas de aplicación" en tu cuenta Google (Seguridad → 2FA → Contraseñas de app). Usa smtp.gmail.com puerto 587.
+      </div>
+
+      <div class="flex gap-2">
+        <button onclick="this.closest('.fixed').remove()" class="flex-1 py-3 rounded-2xl border border-line font-semibold">Cancelar</button>
+        <button onclick="saveEmail(this)" class="flex-1 py-3 rounded-2xl bg-brand text-white font-bold">Guardar</button>
+      </div>
+    </div></div>`);
+  document.body.appendChild(m); draw();
+}
+async function saveEmail(btn){
+  const to=$("#em_to").value.trim(), host=$("#em_host").value.trim();
+  const port=parseInt($("#em_port").value)||587, user=$("#em_user").value.trim(), pw=$("#em_pw").value;
+  if(!to||!host||!user||!pw) return toast("Completa todos los campos","warn");
+  const extra = {host, port, user, password:pw, from:`KidSafe <${user}>`};
+  await api("/api/alerts",{method:"POST",body:JSON.stringify({channel:"email",target:to,extra,triggers:"adult,gambling,new_device,evasion"})});
+  btn.closest(".fixed").remove(); toast("Alerta de email agregada"); Alerts();
+}
+
+async function delAlert(id){ await api("/api/alerts/"+id,{method:"DELETE"}); Alerts(); }
+
+//======================= Ajustes =======================
+async function Settings(){
+  let profs; try{ profs=await api("/api/profiles"); }catch{ return; }
+  const kids = profs.map(p=>`<div class="bg-white rounded-2xl border border-line p-3 flex items-center gap-3 shadow-soft">
+      <span class="text-2xl">${p.emoji}</span>
+      <div class="flex-1"><p class="font-semibold text-sm">${esc(p.name)}</p>
+        <p class="text-xs text-slatey">${esc({pequeno:'Pequeño',nino:'Niño',adolescente:'Adolescente',personalizado:'Personalizado'}[p.preset]||p.preset)} · ${p.device_count} dispositivos</p></div>
+      <button onclick="editKid(${p.id})" class="p-2 text-slatey ringpop">${ICONS('pencil','w-5 h-5')}</button>
+      <button onclick="delKid(${p.id},'${esc(p.name)}')" class="p-2 text-slatey ringpop">${ICONS('trash-2','w-5 h-5')}</button>
+    </div>`).join("");
+  shell("Ajustes", `<div class="pt-1 space-y-5">
+    <div><p class="text-xs font-bold text-slatey uppercase tracking-wide mb-2">Hijos</p>
+      <div class="space-y-2">${kids||'<p class="text-slatey text-sm">Sin hijos.</p>'}</div>
+      <button onclick="newKid()" class="ringpop w-full mt-2 border-2 border-dashed border-line text-slatey font-semibold py-3 rounded-2xl flex items-center justify-center gap-2">${ICONS('plus','w-5 h-5')} Agregar hijo</button>
+    </div>
+    <div><p class="text-xs font-bold text-slatey uppercase tracking-wide mb-2">Sesión</p>
+      <button onclick="logout()" class="ringpop w-full bg-white border border-line rounded-2xl py-3 font-semibold text-danger flex items-center justify-center gap-2">${ICONS('log-out','w-5 h-5')} Cerrar sesión</button>
+    </div>
+    <p class="text-center text-xs text-slatey/60 pt-4">KidSafe · control parental local de tu hogar</p>
+  </div>`,"settings");
+  draw();
+}
+function logout(){ TOKEN=""; localStorage.removeItem("ks_token"); route("login"); }
+function newKid(){ kidModal(); }
+async function editKid(id){ const p=(await api("/api/profiles")).find(x=>x.id==id); kidModal(p); }
+function kidModal(p){
+  const isNew=!p; p=p||{name:"",emoji:"🧒",preset:"nino",age:10};
+  const m=h(`<div class="fixed inset-0 z-50 bg-ink/40 flex items-end sm:items-center justify-center p-4 fade" onclick="if(event.target===this)this.remove()">
+    <div class="bg-white rounded-3xl p-5 w-full max-w-md shadow-soft">
+      <h3 class="display font-extrabold text-lg mb-4">${isNew?'Nuevo hijo':'Editar hijo'}</h3>
+      <div class="flex items-center gap-3 mb-3"><button id="km_emoji" class="text-4xl ringpop">${p.emoji}</button>
+        <input id="km_name" value="${esc(p.name)}" placeholder="Nombre" class="flex-1 px-3 py-3 rounded-2xl border border-line outline-none focus:border-brand"></div>
+      <div class="grid grid-cols-3 gap-2 mb-4" id="km_presets">
+        ${[["pequeno","Pequeño"],["nino","Niño"],["adolescente","Teen"]].map(([v,l])=>`<button data-v="${v}" class="kmp text-xs font-semibold py-2.5 rounded-xl border ${p.preset===v?'border-brand bg-brand/5 text-brand':'border-line text-slatey'}">${l}</button>`).join("")}
+      </div>
+      <div class="flex gap-2">
+        <button onclick="this.closest('.fixed').remove()" class="flex-1 py-3 rounded-2xl border border-line font-semibold">Cancelar</button>
+        <button onclick="saveKid(this,${p.id||0})" class="flex-1 py-3 rounded-2xl bg-brand text-white font-bold">Guardar</button>
+      </div>
+    </div></div>`);
+  document.body.appendChild(m); draw();
+  let emoji=p.emoji, preset=p.preset, ei=KID_EMOJIS.indexOf(p.emoji);
+  $("#km_emoji").onclick=()=>{ ei=(ei+1)%KID_EMOJIS.length; emoji=KID_EMOJIS[ei]; $("#km_emoji").textContent=emoji; };
+  m.querySelectorAll(".kmp").forEach(b=>b.onclick=()=>{ preset=b.dataset.v; m.querySelectorAll(".kmp").forEach(x=>x.className="kmp text-xs font-semibold py-2.5 rounded-xl border border-line text-slatey"); b.className="kmp text-xs font-semibold py-2.5 rounded-xl border border-brand bg-brand/5 text-brand"; });
+  m._get=()=>({name:$("#km_name").value.trim(),emoji,preset});
+}
+async function saveKid(btn,id){
+  const m=btn.closest(".fixed"); const data=m._get();
+  if(!data.name) return toast("Falta el nombre","warn");
+  if(id) await api("/api/profiles/"+id,{method:"PATCH",body:JSON.stringify(data)});
+  else await api("/api/profiles",{method:"POST",body:JSON.stringify(data)});
+  m.remove(); toast("Guardado"); Settings();
+}
+async function delKid(id,name){ if(!confirm("¿Eliminar a "+name+"? Sus dispositivos quedarán sin asignar.")) return; await api("/api/profiles/"+id,{method:"DELETE"}); Settings(); }
+
+//======================= go =======================
+boot();
+</script>
+</body>
+</html>

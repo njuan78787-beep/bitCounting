@@ -1,101 +1,22 @@
-# =============================================================================
-# Bit-Counting — Docker Compose
-# Services: api · postgres · redis
-#
-# Usage:
-#   # First time: copy .env.example → .env and fill in secrets
-#   cp .env.example .env
-#
-#   # Start everything
-#   docker compose up -d
-#
-#   # Tail logs
-#   docker compose logs -f api
-#
-#   # Stop
-#   docker compose down
-#
-#   # Destroy volumes (wipes DB)
-#   docker compose down -v
-# =============================================================================
-
 services:
-
-  # ---------------------------------------------------------------------------
-  # PostgreSQL 16
-  # ---------------------------------------------------------------------------
-  postgres:
-    image: postgres:16-alpine
-    container_name: bit-counting-postgres
+  kidsafe:
+    build: .
+    container_name: kidsafe
     restart: unless-stopped
-    environment:
-      POSTGRES_USER:     ${POSTGRES_USER:-bitcounting}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bitcounting_dev_pass}
-      POSTGRES_DB:       ${POSTGRES_DB:-bitcounting}
+    # En Linux se recomienda network_mode: host para ver las IPs reales de los dispositivos.
+    # Descomenta la línea de abajo y comenta "ports:" si usas Linux.
+    # network_mode: host
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "8080:8080/tcp"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bitcounting}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ---------------------------------------------------------------------------
-  # Redis 7
-  # ---------------------------------------------------------------------------
-  redis:
-    image: redis:7-alpine
-    container_name: bit-counting-redis
-    restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning
-    volumes:
-      - redis_data:/data
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ---------------------------------------------------------------------------
-  # Bit-Counting API
-  # ---------------------------------------------------------------------------
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: bit-counting-api
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - ./data:/data
     environment:
-      # Database — points to the postgres service above
-      DATABASE_URL: postgresql://${POSTGRES_USER:-bitcounting}:${POSTGRES_PASSWORD:-bitcounting_dev_pass}@postgres:5432/${POSTGRES_DB:-bitcounting}
-      # Redis — points to the redis service above
-      REDIS_URL: redis://redis:6379/0
-      # JWT — CHANGE THIS in production
-      JWT_SECRET: ${JWT_SECRET:-BIT-COUNTING-DEV-SECRET-CHANGE-IN-PRODUCTION-2026-MIN32CHARS}
-      # CORS — comma-separated list of allowed origins (add Vercel URL here)
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
-      # Log level
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-    ports:
-      - "8000:8000"
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
-      interval: 30s
-      timeout: 10s
-      start_period: 20s
-      retries: 3
-
-volumes:
-  postgres_data:
-    driver: local
-  redis_data:
-    driver: local
+      - KIDSAFE_DATA=/data
+      - KIDSAFE_DNS_PORT=53
+      - KIDSAFE_WEB_PORT=8080
+      - KIDSAFE_UPSTREAMS=1.1.1.1,8.8.8.8
+      - KIDSAFE_RETENTION_DAYS=90
+    cap_add:
+      - NET_ADMIN

@@ -1,7 +1,12 @@
 .env
 *.env.local
-agents/__pycache__/
 **/__pycache__/
 *.pyc
 *.pyo
 .coverage
+.venv/
+venv/
+data/
+*.db
+*.db-shm
+*.db-wal
